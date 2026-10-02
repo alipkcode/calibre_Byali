@@ -20,7 +20,9 @@ from qt.core import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QPlainTextEdit,
+    QPoint,
     QPushButton,
     QSpinBox,
     QTabWidget,
@@ -38,6 +40,11 @@ from calibre.gui2.byali.ai.agents import (
     load_agents,
     new_agent_template,
     upsert_agent,
+)
+from calibre.gui2.byali.ai.connection_presets import (
+    ConnectionPreset,
+    connection_from_preset,
+    connection_presets,
 )
 from calibre.gui2.byali.ai.connections import (
     Connection,
@@ -72,7 +79,8 @@ class ConnectionsEditor(QWidget):
         left.addLayout(row)
         self.add_btn = QPushButton(_('Add'), self)
         self.del_btn = QPushButton(_('Remove'), self)
-        self.add_btn.clicked.connect(self._add)
+        self.add_btn.setToolTip(_('Add a connection — choose a major provider or Custom'))
+        self.add_btn.clicked.connect(self._show_add_menu)
         self.del_btn.clicked.connect(self._delete_current)
         row.addWidget(self.add_btn)
         row.addWidget(self.del_btn)
@@ -240,10 +248,49 @@ class ConnectionsEditor(QWidget):
         conn.proxy_url = self.proxy_edit.text().strip()
         return conn
 
-    def _add(self):
-        conn = new_connection_template()
+    def _show_add_menu(self):
+        """Drop-up menu of major providers + Custom (same blank template as before)."""
+        menu = QMenu(self)
+        menu.setToolTipsVisible(True)
+        presets = connection_presets()
+        # Cloud / gateway presets first; Custom last (already ordered that way)
+        for preset in presets[:-1]:
+            act = menu.addAction(preset.label)
+            if preset.tip:
+                act.setToolTip(preset.tip)
+                act.setStatusTip(preset.tip)
+            act.triggered.connect(lambda *_a, p=preset: self._add_from_preset(p))
+        menu.addSeparator()
+        custom = presets[-1]
+        custom_act = menu.addAction(custom.label)
+        if custom.tip:
+            custom_act.setToolTip(custom.tip)
+        custom_act.triggered.connect(lambda *_a, p=custom: self._add_from_preset(p))
+
+        # Drop-up: open above the Add button
+        menu.adjustSize()
+        btn_top_left = self.add_btn.mapToGlobal(QPoint(0, 0))
+        pos = QPoint(btn_top_left.x(), btn_top_left.y() - menu.sizeHint().height())
+        menu.exec(pos)
+
+    def _apply_preset_hints(self, preset: ConnectionPreset):
+        self.key_edit.setPlaceholderText(preset.key_placeholder or _('Optional API key (Bearer)'))
+        if preset.tip:
+            self.status.setStyleSheet('')
+            self.status.setText(preset.tip)
+
+    def _add_from_preset(self, preset: ConnectionPreset):
+        if preset.is_custom:
+            conn = new_connection_template()
+        else:
+            conn = connection_from_preset(preset)
         upsert_connection(conn)
         self._reload_list(select_id=conn.id)
+        self._apply_preset_hints(preset)
+
+    def _add(self):
+        # Kept for compatibility; Add button now uses the preset drop-up menu.
+        self._add_from_preset(connection_presets()[-1])
 
     def _delete_current(self):
         conn = self._current()
