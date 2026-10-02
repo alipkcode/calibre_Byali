@@ -2,7 +2,7 @@
 # License: GPLv3 Copyright: 2026, Ali / calibre_Byali
 #
 # Blueprint:
-#   1) Agent model (id, name, system_prompt, user_template)
+#   1) Agent model (prompts + per-agent LLM options)
 #   2) Default rewrite agents (translate / summarize / explain / ...)
 #   3) JSONConfig persistence (additive; never wipe user agents)
 
@@ -19,6 +19,8 @@ from uuid import uuid4
 from calibre.utils.config import JSONConfig
 from calibre.utils.localization import _
 
+REASONING_CHOICES = ('auto', 'none', 'low', 'medium', 'high')
+
 
 @dataclass
 class Agent:
@@ -28,12 +30,26 @@ class Agent:
     user_template: str  # use {selected} for the selected book text
     enabled: bool = True
     builtin: bool = False
+    # Per-agent LLM options (connection / model / sampling)
+    connection_id: str = ''
+    model: str = ''
+    temperature: float = 0.7
+    reasoning_strategy: str = 'auto'
+    allow_web_searches: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Agent:
+        reasoning = str(data.get('reasoning_strategy') or 'auto')
+        if reasoning not in REASONING_CHOICES:
+            reasoning = 'auto'
+        try:
+            temperature = float(data.get('temperature', 0.7))
+        except (TypeError, ValueError):
+            temperature = 0.7
+        temperature = max(0.0, min(2.0, temperature))
         return cls(
             id=str(data.get('id') or uuid4().hex),
             name=str(data.get('name') or _('Unnamed agent')),
@@ -41,6 +57,11 @@ class Agent:
             user_template=str(data.get('user_template') or '{selected}'),
             enabled=bool(data.get('enabled', True)),
             builtin=bool(data.get('builtin', False)),
+            connection_id=str(data.get('connection_id') or ''),
+            model=str(data.get('model') or ''),
+            temperature=temperature,
+            reasoning_strategy=reasoning,
+            allow_web_searches=bool(data.get('allow_web_searches', False)),
         )
 
 
@@ -103,6 +124,7 @@ def default_agents() -> list[Agent]:
 def prefs() -> JSONConfig:
     ans = JSONConfig('byali_ai')
     ans.defaults['agents'] = [a.to_dict() for a in default_agents()]
+    ans.defaults['connections'] = []
     ans.defaults['last_agent_id'] = 'byali-translate'
     return ans
 
@@ -146,12 +168,17 @@ def delete_agent(agent_id: str) -> None:
 
 
 def new_agent_template() -> Agent:
+    from calibre.gui2.byali.ai.connections import load_connections
+
+    connections = load_connections()
+    conn_id = connections[0].id if connections else ''
     return Agent(
         id=uuid4().hex,
         name=_('New agent'),
         system_prompt=_('You rewrite the selected book text. Return ONLY the replacement text.'),
         user_template='{selected}',
         builtin=False,
+        connection_id=conn_id,
     )
 
 
