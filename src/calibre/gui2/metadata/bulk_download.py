@@ -129,6 +129,10 @@ def split_jobs(ids, batch_size=100):
 
 
 def start_download(gui, ids, callback, ensure_fields=None):
+    from calibre.gui2.byali.privacy import ensure_online_metadata_download_allowed
+
+    if not ensure_online_metadata_download_allowed(gui):
+        return
     d = ConfirmDialog(ids, gui)
     ret = d.exec()
     d_b = d.b

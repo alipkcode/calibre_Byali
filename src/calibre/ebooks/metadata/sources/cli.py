@@ -73,6 +73,16 @@ def main(args=sys.argv):
     parser = option_parser()
     opts, args = parser.parse_args(args)
 
+    from calibre.gui2.byali.privacy import allow_online_metadata_download
+
+    if not allow_online_metadata_download():
+        prints(
+            'Byali Privacy: online metadata download is blocked. '
+            'Enable it in Calibre → Byali Privacy, or fill metadata locally.',
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
     buf = BytesIO()
     log = create_log(buf)
     abort = Event()

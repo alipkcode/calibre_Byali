@@ -273,8 +273,11 @@ def init_find_in_tag_browser(menu, ac, field, value):
 
 def download_cover(parent, book_id, current_cover_pixmap):
     from calibre.ebooks.metadata.sources.update import update_sources
+    from calibre.gui2.byali.privacy import ensure_online_metadata_download_allowed
     from calibre.gui2.ui import get_gui
 
+    if not ensure_online_metadata_download_allowed(parent):
+        return None
     update_sources()
     from calibre.gui2.metadata.single_download import CoverFetch
 

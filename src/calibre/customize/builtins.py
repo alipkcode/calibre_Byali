@@ -1188,6 +1188,13 @@ class ActionByaliAI(InterfaceActionBase):
     description = _('Configure LLM APIs and Byali rewrite agents for the ebook viewer')
 
 
+class ActionByaliPrivacy(InterfaceActionBase):
+    name = 'Byali Privacy'
+    author = 'calibre_Byali'
+    actual_plugin = 'calibre.gui2.actions.byali_privacy:ByaliPrivacyAction'
+    description = _('Offline gates for Calibre servers and online metadata downloads')
+
+
 class ActionManageCategories(InterfaceActionBase):
     name = 'Manage categories'
     author = 'Charles Haley'

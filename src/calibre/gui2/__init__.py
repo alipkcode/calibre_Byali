@@ -370,6 +370,7 @@ def create_defs():
             None,
             'Duplicate Books',
             'Byali AI',
+            'Byali Privacy',
         )
         defs['action-layout-toolbar-device'] = (
             'Add Books',
@@ -414,6 +415,7 @@ def create_defs():
             None,
             'Duplicate Books',
             'Byali AI',
+            'Byali Privacy',
         )
         defs['action-layout-toolbar-device'] = (
             'Add Books',

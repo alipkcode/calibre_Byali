@@ -631,7 +631,10 @@ class MetadataSingleDialogBase(QDialog):
 
     def fetch_metadata(self, *args):
         from calibre.ebooks.metadata.sources.update import update_sources
+        from calibre.gui2.byali.privacy import ensure_online_metadata_download_allowed
 
+        if not ensure_online_metadata_download_allowed(self):
+            return
         update_sources()
         d = FullFetch(self.cover.pixmap(), self)
         ret = d.start(title=self.title.current_val, authors=self.authors.current_val, identifiers=self.identifiers.current_val)
@@ -673,7 +676,10 @@ class MetadataSingleDialogBase(QDialog):
 
     def download_cover(self, *args):
         from calibre.ebooks.metadata.sources.update import update_sources
+        from calibre.gui2.byali.privacy import ensure_online_metadata_download_allowed
 
+        if not ensure_online_metadata_download_allowed(self):
+            return
         update_sources()
         from calibre.gui2.metadata.single_download import CoverFetch
 

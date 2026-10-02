@@ -39,8 +39,23 @@ class ByaliAISettingsAction(InterfaceAction):
             triggered=self.open_settings,
             shortcut=False,
         )
+        self.create_menu_action(
+            m,
+            'byali-privacy-from-ai',
+            _('Privacy / Offline…'),
+            icon='config.png',
+            description=_('Offline gates for Calibre servers and online metadata'),
+            triggered=self.open_privacy,
+            shortcut=False,
+        )
         self.qaction.triggered.connect(self.open_settings)
 
     def open_settings(self, *args):
         d = ByaliAISettingsDialog(self.gui)
+        d.exec()
+
+    def open_privacy(self, *args):
+        from calibre.gui2.byali.privacy_dialog import ByaliPrivacyDialog
+
+        d = ByaliPrivacyDialog(self.gui)
         d.exec()

@@ -120,6 +120,15 @@ _update_sources_errors: list[str] = []
 def main(report_error=prints, report_action=prints):
     global _update_sources_worker
     try:
+        try:
+            from calibre.gui2.byali.privacy import allow_metadata_source_updates
+
+            if not allow_metadata_source_updates():
+                report_action('Byali Privacy: metadata source updates blocked')
+                return
+        except Exception:
+            report_action('Byali Privacy: metadata source updates blocked (prefs error)')
+            return
         if time.time() - cache.mtime() < UPDATE_INTERVAL:
             report_action('Metadata sources cache was recently updated not updating again')
             return
@@ -154,6 +163,17 @@ def main(report_error=prints, report_action=prints):
 
 def update_sources(wait_for_completion: bool = False) -> bool:
     global _update_sources_worker, _update_sources_errors
+    # Byali Privacy gate: skip contacting code.calibre-ebook.com/metadata-sources/
+    try:
+        from calibre.gui2.byali.privacy import allow_metadata_source_updates
+
+        if not allow_metadata_source_updates():
+            debug_print('Byali Privacy: metadata source updates blocked')
+            return False
+    except Exception:
+        # If Byali prefs fail to load, stay offline rather than phoning home.
+        debug_print('Byali Privacy: metadata source updates blocked (prefs error)')
+        return False
     if _update_sources_worker is not None:
         return False
     _update_sources_errors = errs = []

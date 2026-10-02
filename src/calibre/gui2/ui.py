@@ -1387,8 +1387,22 @@ class Main(
                 self.quit(confirm_quit=False)
 
     def donate(self, *args):
+        from calibre.gui2.byali.privacy import calibre_donate_url_allowed
         from calibre.utils.localization import localize_website_link
 
+        if not calibre_donate_url_allowed():
+            from calibre.gui2 import info_dialog
+
+            return info_dialog(
+                self,
+                _('Donate offline'),
+                _(
+                    'Byali keeps Donate offline: it does not open calibre-ebook.com.\n\n'
+                    'Support upstream Calibre from another device if you wish, '
+                    'or see Byali Privacy for what stays blocked.'
+                ),
+                show=True,
+            )
         open_url(QUrl(localize_website_link('https://calibre-ebook.com/donate')))
 
     def confirm_quit(self):

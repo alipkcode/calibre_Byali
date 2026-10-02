@@ -186,7 +186,10 @@ class UpdateNotification(QDialog):
 class UpdateMixin:
     def init_update_mixin(self: Main, opts):
         self.last_newest_calibre_version = NO_CALIBRE_UPDATE
-        if not opts.no_update_check:
+        # Byali: never contact Calibre servers for update checks (hard offline).
+        from calibre.gui2.byali.privacy import calibre_update_check_allowed
+
+        if not opts.no_update_check and calibre_update_check_allowed():
             self.update_checker = CheckForUpdates(self)
             self.update_checker.signal.update_found.connect(self.update_found, type=Qt.ConnectionType.QueuedConnection)
             self.update_checker.start()
