@@ -373,22 +373,25 @@ class ByaliAIViewerController(QObject):
             return
 
         rid = uuid4().hex
+        text_direction = getattr(agent, 'text_direction', 'auto') or 'auto'
         debug_log.info(
             'calling byaliStartReplace (iframe postMessage)',
             session=self._session,
             rid=rid,
             original_len=len(original or ''),
             result_len=len(result or ''),
+            text_direction=text_direction,
         )
         o = json.dumps(original)
         r = json.dumps(result)
         i = json.dumps(rid)
+        td = json.dumps(text_direction)
         js = (
             '(function(){ try { '
             'if (!window.byaliStartReplace) { '
             'window.byaliLog && window.byaliLog("ERROR","byaliStartReplace missing"); '
             'return {done:true,ok:false,via:"missing"}; } '
-            f'var v = window.byaliStartReplace({o}, {r}, {i}); '
+            f'var v = window.byaliStartReplace({o}, {r}, {i}, {td}); '
             'if (v === true) return {done:true,ok:true,via:"sync-top"}; '
             'if (v === false) return {done:true,ok:false,via:"sync-fail"}; '
             'return {done:false,ok:false,via:"pending"}; '
@@ -499,23 +502,27 @@ class ByaliAIViewerController(QObject):
                 show=True,
             )
             return
+        text_direction = getattr(agent, 'text_direction', 'auto') or 'auto'
         saved = add_note(
             book_key,
             anchor_text=original,
             note=note_text,
             agent_id=agent.id,
             agent_name=agent.name,
+            text_direction=text_direction,
         )
         meta = {
             'id': saved.id,
             'agent_name': saved.agent_name,
             'created_at': saved.created_at,
+            'text_direction': saved.text_direction or text_direction,
         }
         debug_log.info(
             'calling byaliStartAttachNote (iframe postMessage)',
             session=self._session,
             note_id=saved.id,
             original_len=len(original or ''),
+            text_direction=text_direction,
         )
         a = json.dumps(original)
         n = json.dumps(note_text)

@@ -133,6 +133,13 @@ BYALI_NOTES_HELPER_JS = r'''
     var body = document.createElement('div');
     body.className = 'bn-body';
     body.textContent = note;
+    var noteDir = (btn.getAttribute('data-dir') || 'auto').toLowerCase();
+    if (noteDir === 'ltr' || noteDir === 'rtl') {
+      body.setAttribute('dir', noteDir);
+      body.style.direction = noteDir;
+      body.style.textAlign = noteDir === 'rtl' ? 'right' : 'left';
+      pop.setAttribute('dir', noteDir);
+    }
     pop.appendChild(body);
 
     var ft = document.createElement('div');
@@ -197,6 +204,7 @@ BYALI_NOTES_HELPER_JS = r'''
 
   function buildMark(doc, anchorText, note, meta) {
     ensureStyleInDoc(doc);
+    meta = meta || {};
     var wrap = doc.createElement('span');
     wrap.className = 'byali-note-mark';
     wrap.setAttribute('data-byali-note-id', meta.id || '');
@@ -214,6 +222,7 @@ BYALI_NOTES_HELPER_JS = r'''
     btn.setAttribute('data-note', note || '');
     btn.setAttribute('data-agent', meta.agent_name || '');
     btn.setAttribute('data-created', meta.created_at || '');
+    btn.setAttribute('data-dir', meta.text_direction || 'auto');
     wireIcon(btn);
     wrap.appendChild(text);
     wrap.appendChild(btn);
@@ -272,7 +281,8 @@ BYALI_NOTES_HELPER_JS = r'''
       anchor_text: anchorText || '',
       note: note,
       agent_name: meta.agent_name,
-      created_at: meta.created_at
+      created_at: meta.created_at,
+      text_direction: meta.text_direction || 'auto'
     });
   };
 

@@ -105,6 +105,43 @@ BYALI_VIEWER_HELPER_JS = r'''
     return wrap;
   }
 
+  // Nearest block-level ancestor — only this element gets dir forced (not siblings / body).
+  function findBlockAncestor(node) {
+    var el = node && node.nodeType === 1 ? node : (node && node.parentElement);
+    var BLOCK = /^(P|DIV|LI|BLOCKQUOTE|H[1-6]|TD|TH|DT|DD|FIGCAPTION|SECTION|ARTICLE|ASIDE|HEADER|FOOTER|MAIN)$/i;
+    while (el && el !== document.body && el !== document.documentElement) {
+      if (el.tagName && BLOCK.test(el.tagName)) return el;
+      el = el.parentElement;
+    }
+    return null;
+  }
+
+  function applyParagraphDirection(anchorNode, direction) {
+    var d = String(direction || '').toLowerCase();
+    if (d !== 'ltr' && d !== 'rtl') return false;
+    var block = findBlockAncestor(anchorNode);
+    if (!block) {
+      // Fallback: at least force the rewrite span itself
+      if (anchorNode && anchorNode.nodeType === 1) {
+        anchorNode.setAttribute('dir', d);
+        anchorNode.style.direction = d;
+        anchorNode.style.unicodeBidi = 'isolate';
+        return true;
+      }
+      return false;
+    }
+    block.setAttribute('dir', d);
+    block.style.direction = d;
+    block.style.textAlign = d === 'rtl' ? 'right' : 'left';
+    block.setAttribute('data-byali-dir', d);
+    byaliLog('INFO', 'forced paragraph direction', {
+      dir: d,
+      tag: block.tagName || '',
+      preview: String(block.textContent || '').slice(0, 60)
+    });
+    return true;
+  }
+
   function localSelectionInfo(original) {
     var info = {
       is_top: isTop,
@@ -195,15 +232,25 @@ BYALI_VIEWER_HELPER_JS = r'''
   }
 
   // Replace inside THIS document only (works when called inside the book iframe).
-  function replaceInThisDocument(original, rewritten, rid) {
+  function replaceInThisDocument(original, rewritten, rid, textDirection) {
     byaliLog('INFO', 'replaceInThisDocument', {
       is_top: isTop,
       original_len: original ? String(original).length : 0,
       rewritten_len: rewritten ? String(rewritten).length : 0,
+      text_direction: textDirection || 'auto',
       sel: localSelectionInfo(original)
     });
     var doc = document;
     var sel = window.getSelection ? window.getSelection() : null;
+
+    function finishOk(wrap) {
+      try {
+        applyParagraphDirection(wrap, textDirection);
+      } catch (eDir) {
+        byaliLog('WARN', 'applyParagraphDirection failed', { error: String(eDir) });
+      }
+      return true;
+    }
 
     // 1) Live selection in this frame
     if (sel && sel.rangeCount) {
@@ -216,7 +263,7 @@ BYALI_VIEWER_HELPER_JS = r'''
           range.insertNode(wrap);
           sel.removeAllRanges();
           byaliLog('INFO', 'replace via live selection SUCCESS', { is_top: isTop, rid: rid || '' });
-          return true;
+          return finishOk(wrap);
         } catch (e) {
           byaliLog('ERROR', 'live selection insert failed', {
             is_top: isTop,
@@ -235,7 +282,7 @@ BYALI_VIEWER_HELPER_JS = r'''
           fr.deleteContents();
           fr.insertNode(wrap2);
           byaliLog('INFO', 'replace via text search SUCCESS', { is_top: isTop, rid: rid || '' });
-          return true;
+          return finishOk(wrap2);
         } catch (e2) {
           byaliLog('ERROR', 'text search insert failed', {
             is_top: isTop,
@@ -288,11 +335,17 @@ BYALI_VIEWER_HELPER_JS = r'''
     if (!isTop && data.__byali === MSG_REPLACE) {
       byaliLog('INFO', 'iframe received replace request', {
         rid: data.rid || '',
-        original_len: data.original ? String(data.original).length : 0
+        original_len: data.original ? String(data.original).length : 0,
+        text_direction: data.text_direction || 'auto'
       });
       var ok = false;
       try {
-        ok = replaceInThisDocument(data.original || '', data.rewritten || '', data.rid || '');
+        ok = replaceInThisDocument(
+          data.original || '',
+          data.rewritten || '',
+          data.rid || '',
+          data.text_direction || 'auto'
+        );
       } catch (e) {
         byaliLog('ERROR', 'iframe replace threw', { error: String(e) });
       }
@@ -322,7 +375,7 @@ BYALI_VIEWER_HELPER_JS = r'''
     }, false);
   }
 
-  function postReplaceToIframes(original, rewritten, rid) {
+  function postReplaceToIframes(original, rewritten, rid, textDirection) {
     var frames = document.querySelectorAll('iframe');
     var sent = 0;
     var errors = [];
@@ -337,7 +390,8 @@ BYALI_VIEWER_HELPER_JS = r'''
           __byali: MSG_REPLACE,
           original: original || '',
           rewritten: rewritten || '',
-          rid: rid || ''
+          rid: rid || '',
+          text_direction: textDirection || 'auto'
         }, '*');
         sent++;
       } catch (e) {
@@ -349,24 +403,25 @@ BYALI_VIEWER_HELPER_JS = r'''
   }
 
   // Called from Python on the TOP frame. Kicks off async iframe replace.
-  window.byaliStartReplace = function (original, rewritten, rid) {
+  window.byaliStartReplace = function (original, rewritten, rid, textDirection) {
     byaliLog('INFO', 'byaliStartReplace', {
       is_top: isTop,
       original_len: original ? String(original).length : 0,
       rewritten_len: rewritten ? String(rewritten).length : 0,
       rid: rid || '',
+      text_direction: textDirection || 'auto',
       local_sel: localSelectionInfo(original)
     });
     window.__byaliReplaceResult = { done: false, ok: false, rid: rid || '', via: '' };
 
     // Try this frame first (rare for book content, but cheap)
-    if (replaceInThisDocument(original, rewritten, rid)) {
+    if (replaceInThisDocument(original, rewritten, rid, textDirection)) {
       window.__byaliReplaceResult = { done: true, ok: true, rid: rid || '', via: 'top' };
       return true;
     }
 
     if (isTop) {
-      var sent = postReplaceToIframes(original, rewritten, rid);
+      var sent = postReplaceToIframes(original, rewritten, rid, textDirection);
       if (!sent) {
         // Last resort: text search already tried on top; mark failed soon
         window.__byaliReplaceResult = { done: true, ok: false, rid: rid || '', via: 'no-iframe' };
@@ -384,11 +439,11 @@ BYALI_VIEWER_HELPER_JS = r'''
   };
 
   // Back-compat name used by older callers: prefer StartReplace semantics on top.
-  window.byaliReplaceSelection = function (original, rewritten, rid) {
+  window.byaliReplaceSelection = function (original, rewritten, rid, textDirection) {
     if (isTop) {
-      return window.byaliStartReplace(original, rewritten, rid);
+      return window.byaliStartReplace(original, rewritten, rid, textDirection);
     }
-    return replaceInThisDocument(original, rewritten, rid);
+    return replaceInThisDocument(original, rewritten, rid, textDirection);
   };
 
   window.byaliGetSelectedText = function () {
@@ -498,7 +553,7 @@ BYALI_VIEWER_HELPER_JS = r'''
   }
 
   window.__byali_ai_helper__ = true;
-  window.__byali_ai_helper_ver__ = 2;
-  byaliLog('INFO', 'Byali rewrite helper installed/updated', { is_top: isTop, ver: 2 });
+  window.__byali_ai_helper_ver__ = 3;
+  byaliLog('INFO', 'Byali rewrite helper installed/updated', { is_top: isTop, ver: 3 });
 })();
 '''

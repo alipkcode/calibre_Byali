@@ -32,12 +32,16 @@ class PassageNote:
     agent_name: str = ''
     created_at: str = ''
     updated_at: str = ''
+    text_direction: str = 'auto'  # auto | ltr | rtl for note popover
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> PassageNote:
+        direction = str(data.get('text_direction') or 'auto').lower()
+        if direction not in ('auto', 'ltr', 'rtl'):
+            direction = 'auto'
         return cls(
             id=str(data.get('id') or uuid4().hex),
             anchor_text=str(data.get('anchor_text') or ''),
@@ -46,6 +50,7 @@ class PassageNote:
             agent_name=str(data.get('agent_name') or ''),
             created_at=str(data.get('created_at') or ''),
             updated_at=str(data.get('updated_at') or ''),
+            text_direction=direction,
         )
 
 
@@ -83,8 +88,12 @@ def add_note(
     agent_id: str = '',
     agent_name: str = '',
     note_id: str | None = None,
+    text_direction: str = 'auto',
 ) -> PassageNote:
     now = _now_iso()
+    direction = (text_direction or 'auto').lower()
+    if direction not in ('auto', 'ltr', 'rtl'):
+        direction = 'auto'
     item = PassageNote(
         id=note_id or uuid4().hex,
         anchor_text=(anchor_text or '').strip(),
@@ -93,6 +102,7 @@ def add_note(
         agent_name=agent_name or '',
         created_at=now,
         updated_at=now,
+        text_direction=direction,
     )
     notes = list_notes_for_book(book_key)
     notes.append(item)
@@ -130,6 +140,7 @@ def notes_as_js_payload(book_key: str) -> list[dict[str, Any]]:
             'note': n.note,
             'agent_name': n.agent_name,
             'created_at': n.created_at,
+            'text_direction': n.text_direction or 'auto',
         }
         for n in list_notes_for_book(book_key)
         if n.anchor_text and n.note

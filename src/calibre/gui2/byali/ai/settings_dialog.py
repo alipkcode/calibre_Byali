@@ -4,7 +4,7 @@
 # Blueprint:
 #   Tab 1 — ConnectionsEditor: OpenAI-compatible endpoints + Use-proxy checkbox
 #   Tab 2 — ProxiesEditor: test proxies (PBE5 two-step) + approve named presets
-#   Tab 3 — AgentsEditor: prompts + per-agent connection/model/temp/reasoning/search
+#   Tab 3 — AgentsEditor: prompts + per-agent connection/model/temp/reasoning/search/direction
 
 """Settings dialog for Byali multi-connection LLM setup and rewrite agents."""
 
@@ -37,6 +37,10 @@ from calibre.gui2.byali.ai.agents import (
     OUTPUT_MODE_NOTE,
     OUTPUT_MODE_REPLACE,
     REASONING_CHOICES,
+    TEXT_DIRECTION_AUTO,
+    TEXT_DIRECTION_CHOICES,
+    TEXT_DIRECTION_LTR,
+    TEXT_DIRECTION_RTL,
     Agent,
     delete_agent,
     ensure_defaults_seeded,
@@ -469,8 +473,22 @@ class AgentsEditor(QWidget):
             )
         )
 
+        self.direction_combo = QComboBox(self)
+        self.direction_combo.addItem(_('Auto (leave as-is)'), TEXT_DIRECTION_AUTO)
+        self.direction_combo.addItem(_('Left to right (LTR)'), TEXT_DIRECTION_LTR)
+        self.direction_combo.addItem(_('Right to left (RTL)'), TEXT_DIRECTION_RTL)
+        self.direction_combo.setToolTip(
+            _(
+                'Replace agents: after rewriting, force only the paragraph that contains the selection '
+                'to this direction (other paragraphs are untouched).\n'
+                'Note agents: force this direction inside the note popover body.\n'
+                'Auto leaves layout unchanged.'
+            )
+        )
+
         form.addRow(_('Name:'), self.name_edit)
         form.addRow(_('&Output mode:'), self.output_mode_combo)
+        form.addRow(_('Text &direction:'), self.direction_combo)
         form.addRow(_('System prompt:'), self.system_edit)
         form.addRow(_('User template:'), self.user_edit)
         form.addRow(_('LLM &connection:'), self.connection_combo)
@@ -481,8 +499,10 @@ class AgentsEditor(QWidget):
 
         tip = QLabel(
             _(
-                'Model / temperature / reasoning / search are configured per agent. Connections are shared.\n'
-                'Note agents never rewrite the page — they save a note and show an “N” icon on the passage.'
+                'Model / temperature / reasoning / search / text direction are configured per agent. '
+                'Connections are shared.\n'
+                'Note agents never rewrite the page — they save a note and show an “N” icon on the passage.\n'
+                'Text direction RTL/LTR applies only to the rewritten paragraph (replace) or the note UI (notes).'
             )
         )
         tip.setWordWrap(True)
@@ -595,6 +615,8 @@ class AgentsEditor(QWidget):
         self.user_edit.setPlainText(agent.user_template)
         mode_idx = self.output_mode_combo.findData(agent.output_mode)
         self.output_mode_combo.setCurrentIndex(max(0, mode_idx))
+        dir_idx = self.direction_combo.findData(getattr(agent, 'text_direction', TEXT_DIRECTION_AUTO) or TEXT_DIRECTION_AUTO)
+        self.direction_combo.setCurrentIndex(max(0, dir_idx))
         self._fill_connections(select_id=agent.connection_id or None)
         self._populate_models_from_connection(preferred_model=agent.model)
         self.temp_sb.setValue(float(agent.temperature))
@@ -624,6 +646,10 @@ class AgentsEditor(QWidget):
         if mode not in OUTPUT_MODE_CHOICES:
             mode = OUTPUT_MODE_REPLACE
         agent.output_mode = mode
+        direction = self.direction_combo.currentData() or TEXT_DIRECTION_AUTO
+        if direction not in TEXT_DIRECTION_CHOICES:
+            direction = TEXT_DIRECTION_AUTO
+        agent.text_direction = direction
         agent.enabled = True
         agent.connection_id = self.connection_combo.currentData() or ''
         agent.model = self.model_combo.currentText().strip()

@@ -2,7 +2,7 @@
 # License: GPLv3 Copyright: 2026, Ali / calibre_Byali
 #
 # Blueprint:
-#   1) Agent model (prompts + per-agent LLM options)
+#   1) Agent model (prompts + per-agent LLM options + text_direction)
 #   2) Default rewrite agents (translate / summarize / explain / ...)
 #   3) JSONConfig persistence (additive; never wipe user agents)
 
@@ -23,6 +23,11 @@ REASONING_CHOICES = ('auto', 'none', 'low', 'medium', 'high')
 OUTPUT_MODE_REPLACE = 'replace'
 OUTPUT_MODE_NOTE = 'note'
 OUTPUT_MODE_CHOICES = (OUTPUT_MODE_REPLACE, OUTPUT_MODE_NOTE)
+# auto = leave book/note layout alone; ltr/rtl = force direction for that agent
+TEXT_DIRECTION_AUTO = 'auto'
+TEXT_DIRECTION_LTR = 'ltr'
+TEXT_DIRECTION_RTL = 'rtl'
+TEXT_DIRECTION_CHOICES = (TEXT_DIRECTION_AUTO, TEXT_DIRECTION_LTR, TEXT_DIRECTION_RTL)
 
 
 @dataclass
@@ -41,6 +46,8 @@ class Agent:
     allow_web_searches: bool = False
     # replace = swap selection; note = keep text + attach AI note icon
     output_mode: str = OUTPUT_MODE_REPLACE
+    # Force paragraph (replace) or note popover (note) text direction
+    text_direction: str = TEXT_DIRECTION_AUTO
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -53,6 +60,9 @@ class Agent:
         mode = str(data.get('output_mode') or OUTPUT_MODE_REPLACE)
         if mode not in OUTPUT_MODE_CHOICES:
             mode = OUTPUT_MODE_REPLACE
+        direction = str(data.get('text_direction') or TEXT_DIRECTION_AUTO).lower()
+        if direction not in TEXT_DIRECTION_CHOICES:
+            direction = TEXT_DIRECTION_AUTO
         try:
             temperature = float(data.get('temperature', 0.7))
         except (TypeError, ValueError):
@@ -71,6 +81,7 @@ class Agent:
             reasoning_strategy=reasoning,
             allow_web_searches=bool(data.get('allow_web_searches', False)),
             output_mode=mode,
+            text_direction=direction,
         )
 
     @property
