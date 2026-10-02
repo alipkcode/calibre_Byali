@@ -173,13 +173,15 @@ def as_chat_responses(d: dict[str, Any], model_id: str) -> Iterator[ChatResponse
 
 def text_chat_implementation(messages: Iterable[ChatMessage], use_model: str = '') -> Iterator[ChatResponse]:
     model_id = use_model or pref('text_model')
-    temperature = pref('temperature', 0.7)
-    data = {
+    data: dict[str, Any] = {
         'model': model_id,
         'messages': [for_assistant(m) for m in messages],
         'stream': True,
-        'temperature': temperature,
     }
+    # Some providers/models (o1/o3/gpt-5-style, various gateways) reject temperature.
+    # Byali can set disable_temperature=True in prefs overrides to omit it on retry.
+    if not pref('disable_temperature', False):
+        data['temperature'] = pref('temperature', 0.7)
     rq = chat_request(data)
     seen_metadata = False
     for data in read_streaming_response(rq, OpenAICompatible.name, timeout=pref('timeout', 120)):

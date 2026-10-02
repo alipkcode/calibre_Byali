@@ -5,9 +5,9 @@
 #   1) Track selected text from viewer
 #   2) Context-menu → AI Agents / Note agents + Debug Log
 #   3) Run agent in a worker thread (logged session)
-#   4) replace mode → JS rewrite wrapper + drain JS logs
+#   4) replace mode → JS rewrite wrapper + persist + drain JS logs
 #   5) note mode → attach note icon + persist in notes_store
-#   6) Restore notes on content load; flush JS deletes to store
+#   6) Restore notes + rewrites on content load; flush JS deletes to store
 #   7) On replace/note failure → open Byali Debug Log automatically
 
 """Ebook-viewer integration for Byali AI Agents rewrite + passage notes."""
@@ -37,6 +37,7 @@ from calibre.gui2.byali.ai.notes_store import (
     notes_as_js_payload,
 )
 from calibre.gui2.byali.ai.replace_js import BYALI_VIEWER_HELPER_JS
+from calibre.gui2.byali.ai.rewrite_store import add_rewrite, rewrites_as_js_payload
 from calibre.gui2.byali.ai.runner import AgentRunError, run_agent_on_text
 from calibre.gui2.byali.ai.settings_dialog import ByaliAISettingsDialog
 from calibre.utils.localization import _
@@ -178,6 +179,7 @@ class ByaliAIViewerController(QObject):
         except Exception as e:
             debug_log.exception('inject helpers failed', e)
         self._restore_notes()
+        self._restore_rewrites()
         self._drain_js_log()
 
     def _on_content_changed(self, *args):
@@ -197,6 +199,26 @@ class ByaliAIViewerController(QObject):
             self._runjs(js)
         except Exception as e:
             debug_log.exception('restore notes failed', e)
+
+    def _restore_rewrites(self):
+        key = self._book_key()
+        if not key:
+            return
+        payload = rewrites_as_js_payload(key)
+        if not payload:
+            return
+        debug_log.debug('restore rewrites', count=len(payload), book_key=key[:16])
+        js = 'window.byaliRestoreRewrites && window.byaliRestoreRewrites(' + json.dumps(payload) + ')'
+
+        def _run():
+            try:
+                self._runjs(js)
+            except Exception as e:
+                debug_log.exception('restore rewrites failed', e)
+
+        _run()
+        # Book iframe may still be booting after content_file_changed — one delayed retry.
+        QTimer.singleShot(250, _run)
 
     def _flush_deleted_notes(self):
         key = self._book_key()
@@ -401,10 +423,12 @@ class ByaliAIViewerController(QObject):
             '})()'
         )
         self._replace_ctx = {
+            'agent_id': agent.id,
             'agent_name': agent.name,
             'original': original,
             'result': result,
             'rid': rid,
+            'text_direction': text_direction,
             'attempts': 0,
         }
         self._runjs(js, callback=self._on_replace_started)
@@ -456,7 +480,11 @@ class ByaliAIViewerController(QObject):
         ctx = getattr(self, '_replace_ctx', None) or {}
         self._replace_ctx = None
         agent_name = ctx.get('agent_name') or ''
+        agent_id = ctx.get('agent_id') or ''
+        original = ctx.get('original') or ''
         result = ctx.get('result') or ''
+        rid = ctx.get('rid') or ''
+        text_direction = ctx.get('text_direction') or 'auto'
         debug_log.info(
             'finish replace',
             session=self._session,
@@ -467,6 +495,26 @@ class ByaliAIViewerController(QObject):
 
         def _done():
             if ok:
+                book_key = self._book_key()
+                if book_key and original and result:
+                    try:
+                        add_rewrite(
+                            book_key,
+                            original_text=original,
+                            rewritten_text=result,
+                            agent_id=agent_id,
+                            agent_name=agent_name,
+                            rewrite_id=rid or None,
+                            text_direction=text_direction,
+                        )
+                        debug_log.info(
+                            'rewrite persisted',
+                            session=self._session,
+                            book_key=book_key[:16],
+                            rid=rid,
+                        )
+                    except Exception as e:
+                        debug_log.exception('rewrite persist failed', e, session=self._session)
                 self.viewer.web_view.generic_action(
                     'show-status-message',
                     {'text': _('AI Agents: replaced selection with “{}” output').format(agent_name)},

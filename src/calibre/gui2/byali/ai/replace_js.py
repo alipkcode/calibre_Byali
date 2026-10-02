@@ -552,8 +552,87 @@ BYALI_VIEWER_HELPER_JS = r'''
     }, false);
   }
 
+  // --- Persist / restore rewrites (viewer overlay; same idea as notes) ---
+  var MSG_REWRITE_RESTORE = 'byali-rewrites-restore';
+
+  function alreadyRewritten(doc, rid) {
+    if (!rid) return false;
+    try {
+      return !!doc.querySelector('.byali-rewrite[data-byali-id="' + String(rid).replace(/"/g, '') + '"]');
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function restoreOneRewriteInThisDocument(item) {
+    item = item || {};
+    var rid = item.id || '';
+    var original = item.original_text || '';
+    var rewritten = item.rewritten_text || '';
+    var direction = item.text_direction || 'auto';
+    if (!original || !rewritten) return false;
+    if (alreadyRewritten(document, rid)) return true;
+    var fr = findTextRange(document, original) || findTextRange(document, String(original).trim());
+    if (!fr) return false;
+    try {
+      var wrap = buildWrapper(document, original, rewritten, rid);
+      fr.deleteContents();
+      fr.insertNode(wrap);
+      applyParagraphDirection(wrap, direction);
+      byaliLog('INFO', 'restored rewrite', { rid: rid, dir: direction });
+      return true;
+    } catch (e) {
+      byaliLog('ERROR', 'restore rewrite failed', { error: String(e), rid: rid });
+      return false;
+    }
+  }
+
+  window.byaliRestoreRewritesInThisDocument = function (items) {
+    items = items || [];
+    var ok = 0;
+    for (var i = 0; i < items.length; i++) {
+      try {
+        if (restoreOneRewriteInThisDocument(items[i])) ok++;
+      } catch (e) {}
+    }
+    return ok;
+  };
+
+  window.byaliRestoreRewrites = function (items) {
+    items = items || [];
+    var ok = window.byaliRestoreRewritesInThisDocument(items);
+    if (isTop) {
+      var frames = document.querySelectorAll('iframe');
+      for (var i = 0; i < frames.length; i++) {
+        try {
+          frames[i].contentWindow.postMessage({ __byali: MSG_REWRITE_RESTORE, items: items }, '*');
+        } catch (e) {}
+      }
+    }
+    byaliLog('INFO', 'byaliRestoreRewrites', { is_top: isTop, count: items.length, applied: ok });
+    return ok;
+  };
+
+  window.__byaliOnRewriteRestoreMessage = function (ev) {
+    var data = ev && ev.data;
+    if (!data || typeof data !== 'object') return;
+    if (!isTop && data.__byali === MSG_REWRITE_RESTORE) {
+      try {
+        window.byaliRestoreRewritesInThisDocument(data.items || []);
+      } catch (e) {}
+    }
+  };
+  if (!window.__byali_rewrite_restore_hook__) {
+    window.__byali_rewrite_restore_hook__ = true;
+    window.addEventListener('message', function (ev) {
+      if (typeof window.__byaliOnRewriteRestoreMessage === 'function') {
+        window.__byaliOnRewriteRestoreMessage(ev);
+      }
+    }, false);
+  }
+
   window.__byali_ai_helper__ = true;
-  window.__byali_ai_helper_ver__ = 3;
-  byaliLog('INFO', 'Byali rewrite helper installed/updated', { is_top: isTop, ver: 3 });
+  window.__byali_ai_helper_ver__ = 4;
+  byaliLog('INFO', 'Byali rewrite helper installed/updated', { is_top: isTop, ver: 4 });
 })();
 '''
