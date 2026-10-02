@@ -3,11 +3,12 @@
 #
 # Blueprint:
 #   1) Track selected text from viewer
-#   2) Context-menu → AI Agents (rewrite) + Note agents submenus
-#   3) Run agent in a worker thread
-#   4) replace mode → existing JS rewrite wrapper
+#   2) Context-menu → AI Agents / Note agents + Debug Log
+#   3) Run agent in a worker thread (logged session)
+#   4) replace mode → JS rewrite wrapper + drain JS logs
 #   5) note mode → attach note icon + persist in notes_store
 #   6) Restore notes on content load; flush JS deletes to store
+#   7) On replace/note failure → open Byali Debug Log automatically
 
 """Ebook-viewer integration for Byali AI Agents rewrite + passage notes."""
 
@@ -21,12 +22,14 @@ from uuid import uuid4
 from qt.core import QCursor, QEvent, QMenu, QObject, QProgressDialog, Qt, QTimer, pyqtSignal
 
 from calibre.gui2 import error_dialog, info_dialog
+from calibre.gui2.byali.ai import debug_log
 from calibre.gui2.byali.ai.agents import (
     OUTPUT_MODE_NOTE,
     ensure_defaults_seeded,
     load_agents,
     prefs as agent_prefs,
 )
+from calibre.gui2.byali.ai.debug_log_dialog import ByaliDebugLogDialog
 from calibre.gui2.byali.ai.notes_js import BYALI_NOTES_HELPER_JS
 from calibre.gui2.byali.ai.notes_store import (
     add_note,
@@ -42,16 +45,25 @@ from calibre.utils.localization import _
 class _AgentWorker(QObject):
     finished = pyqtSignal(object, object, object)  # agent, original, result_or_exc
 
-    def __init__(self, agent, selected_text):
+    def __init__(self, agent, selected_text, session: str = ''):
         super().__init__()
         self.agent = agent
         self.selected_text = selected_text
+        self.session = session
 
     def run(self):
         try:
+            debug_log.info('worker: calling LLM', session=self.session, agent=self.agent.name)
             result = run_agent_on_text(self.agent, self.selected_text)
+            debug_log.info(
+                'worker: LLM ok',
+                session=self.session,
+                result_len=len(result or ''),
+                result_preview=(result or '')[:120],
+            )
             self.finished.emit(self.agent, self.selected_text, result)
         except Exception as e:
+            debug_log.exception('worker: LLM failed', e, session=self.session, agent=self.agent.name)
             self.finished.emit(self.agent, self.selected_text, e)
 
 
@@ -60,7 +72,10 @@ class ByaliAIViewerController(QObject):
         super().__init__(viewer)
         self.viewer = viewer
         self.selected_text = ''
+        self._session = ''
+        self._log_dialog = None
         ensure_defaults_seeded()
+        debug_log.info('ByaliAIViewerController installed')
         web = viewer.web_view
         web.selection_changed.connect(self._on_selection_changed)
         web.installEventFilter(self)
@@ -77,7 +92,6 @@ class ByaliAIViewerController(QObject):
 
     def _book_key(self) -> str:
         data = getattr(self.viewer, 'current_book_data', None) or {}
-        # Prefer viewer annotations key when present
         key = data.get('annotations_path_key')
         if key:
             key = str(key)
@@ -95,18 +109,62 @@ class ByaliAIViewerController(QObject):
         page = self.viewer.web_view._page
         page.runjs(src, callback=callback)
 
+    def _drain_js_log(self, then=None):
+        session = self._session
+
+        def _got(raw):
+            try:
+                n = debug_log.ingest_js_entries(raw, session=session)
+                debug_log.debug('drained JS log entries', session=session, count=n)
+            except Exception as e:
+                debug_log.exception('JS log drain failed', e, session=session)
+            if then:
+                then()
+
+        try:
+            self._runjs(
+                'window.byaliDrainJsLog ? JSON.stringify(window.byaliDrainJsLog()) : "[]"',
+                callback=_got,
+            )
+        except Exception as e:
+            debug_log.exception('runjs drain failed', e, session=session)
+            if then:
+                then()
+
+    def _open_debug_log(self, *args):
+        if self._log_dialog is not None:
+            try:
+                if self._log_dialog.isVisible():
+                    self._log_dialog.raise_()
+                    self._log_dialog.activateWindow()
+                    return
+            except Exception:
+                self._log_dialog = None
+        self._log_dialog = ByaliDebugLogDialog(self.viewer)
+        self._log_dialog.show()
+
     def _on_selection_changed(self, text, annot):
         self.selected_text = text or ''
+        preview = (text or '')[:60].replace('\n', ' ')
+        debug_log.debug(
+            'selection_changed',
+            len=len(text or ''),
+            preview=preview,
+            has_annot=annot is not None,
+        )
 
     def _inject_helper(self, *args):
+        debug_log.debug('inject helpers')
         try:
             self._runjs(BYALI_VIEWER_HELPER_JS)
             self._runjs(BYALI_NOTES_HELPER_JS)
-        except Exception:
-            pass
+        except Exception as e:
+            debug_log.exception('inject helpers failed', e)
         self._restore_notes()
+        self._drain_js_log()
 
     def _on_content_changed(self, *args):
+        debug_log.debug('content_file_changed')
         self._flush_deleted_notes()
         self._inject_helper()
 
@@ -120,8 +178,8 @@ class ByaliAIViewerController(QObject):
         js = 'window.byaliRestoreNotes && window.byaliRestoreNotes(' + json.dumps(payload) + ')'
         try:
             self._runjs(js)
-        except Exception:
-            pass
+        except Exception as e:
+            debug_log.exception('restore notes failed', e)
 
     def _flush_deleted_notes(self):
         key = self._book_key()
@@ -141,6 +199,7 @@ class ByaliAIViewerController(QObject):
                     ids = []
             if ids:
                 delete_notes(key, ids)
+                debug_log.info('flushed deleted note ids', count=len(ids))
 
         try:
             self._runjs(
@@ -203,6 +262,7 @@ class ByaliAIViewerController(QObject):
 
         menu.addSeparator()
         menu.addAction(_('Byali AI Settings…'), self.open_settings)
+        menu.addAction(_('Byali Debug Log…'), self._open_debug_log)
         menu.exec(global_pos)
 
     def open_settings(self):
@@ -211,9 +271,36 @@ class ByaliAIViewerController(QObject):
 
     def run_agent(self, agent, selected_text):
         if self._busy:
+            debug_log.warn('run_agent ignored — already busy', agent=agent.name)
             return
         self._busy = True
+        self._session = debug_log.new_session(f'agent:{agent.name}')
+        debug_log.info(
+            'run_agent start',
+            session=self._session,
+            agent=agent.name,
+            agent_id=agent.id,
+            output_mode=getattr(agent, 'output_mode', ''),
+            selected_len=len(selected_text or ''),
+            selected_preview=(selected_text or '')[:120],
+            book_key=self._book_key()[:16] if self._book_key() else '',
+        )
         self._inject_helper()
+        # Diagnose selection state right before progress dialog (focus steal risk)
+        try:
+            self._runjs(
+                'window.byaliDiagnoseSelection && JSON.stringify(window.byaliDiagnoseSelection('
+                + json.dumps(selected_text)
+                + '))',
+                callback=lambda raw: debug_log.info(
+                    'pre-progress selection diagnose',
+                    session=self._session,
+                    diagnose=raw if not isinstance(raw, str) else raw[:2000],
+                ),
+            )
+        except Exception as e:
+            debug_log.exception('pre-progress diagnose failed', e, session=self._session)
+
         label = _('Creating note: {}') if agent.is_note_agent else _('Running AI agent: {}')
         self._progress = QProgressDialog(
             label.format(agent.name),
@@ -226,8 +313,9 @@ class ByaliAIViewerController(QObject):
         self._progress.setWindowModality(Qt.WindowModality.WindowModal)
         self._progress.setMinimumDuration(400)
         self._progress.show()
+        debug_log.info('progress dialog shown (may clear DOM selection)', session=self._session)
 
-        worker = _AgentWorker(agent, selected_text)
+        worker = _AgentWorker(agent, selected_text, session=self._session)
         worker.finished.connect(self._on_agent_finished, Qt.ConnectionType.QueuedConnection)
         self._worker = worker
         Thread(target=worker.run, daemon=True, name='ByaliAIAgent').start()
@@ -237,10 +325,29 @@ class ByaliAIViewerController(QObject):
         self._busy = False
         try:
             self._progress.close()
-        except Exception:
-            pass
+            debug_log.info('progress dialog closed', session=self._session)
+        except Exception as e:
+            debug_log.exception('progress close failed', e, session=self._session)
+
+        # Diagnose selection AFTER progress closes (this is the critical moment)
+        try:
+            self._runjs(
+                'window.byaliDiagnoseSelection && JSON.stringify(window.byaliDiagnoseSelection('
+                + json.dumps(original)
+                + '))',
+                callback=lambda raw: debug_log.info(
+                    'post-progress selection diagnose',
+                    session=self._session,
+                    diagnose=raw if not isinstance(raw, str) else raw[:2000],
+                ),
+            )
+        except Exception as e:
+            debug_log.exception('post-progress diagnose failed', e, session=self._session)
+
         if isinstance(result, Exception):
             msg = str(result) if isinstance(result, AgentRunError) else _('AI request failed: {}').format(result)
+            debug_log.error('agent finished with exception', session=self._session, msg=msg)
+            self._drain_js_log(then=self._open_debug_log)
             error_dialog(self.viewer, _('AI Agents'), msg, show=True)
             return
 
@@ -249,15 +356,35 @@ class ByaliAIViewerController(QObject):
             return
 
         rid = uuid4().hex
+        debug_log.info(
+            'calling byaliReplaceSelection',
+            session=self._session,
+            rid=rid,
+            original_len=len(original or ''),
+            result_len=len(result or ''),
+        )
         o = json.dumps(original)
         r = json.dumps(result)
         i = json.dumps(rid)
-        js = f'window.byaliReplaceSelection && window.byaliReplaceSelection({o}, {r}, {i})'
+        js = (
+            '(function(){ try { '
+            'if (!window.byaliReplaceSelection) { '
+            'window.byaliLog && window.byaliLog("ERROR","byaliReplaceSelection missing"); '
+            'return false; } '
+            f'return window.byaliReplaceSelection({o}, {r}, {i}); '
+            '} catch (e) { '
+            'window.byaliLog && window.byaliLog("ERROR","replace threw",{error:String(e)}); '
+            'return false; } '
+            '})()'
+        )
         self._runjs(js, callback=partial(self._after_replace, agent.name, original, result))
 
     def _apply_note(self, agent, original, note_text):
         book_key = self._book_key()
+        debug_log.info('apply note', session=self._session, book_key=book_key[:16] if book_key else '')
         if not book_key:
+            debug_log.error('note: no book key', session=self._session)
+            self._drain_js_log(then=self._open_debug_log)
             info_dialog(
                 self.viewer,
                 _('Note ready'),
@@ -290,18 +417,22 @@ class ByaliAIViewerController(QObject):
         self._runjs(js, callback=partial(self._after_note_attach, agent.name, note_text))
 
     def _after_note_attach(self, agent_name, note_text, ok):
+        debug_log.info('after note attach', session=self._session, ok=ok, ok_type=type(ok).__name__)
+        self._drain_js_log()
         if ok:
             self.viewer.web_view.generic_action(
                 'show-status-message',
                 {'text': _('Byali: note attached ({})').format(agent_name)},
             )
             return
+        debug_log.error('note attach failed in page', session=self._session)
+        self._open_debug_log()
         info_dialog(
             self.viewer,
             _('Note saved'),
             _(
                 'The note was saved for this book, but the selection could not be marked in the page '
-                '(it may have been cleared). Re-open the chapter or search the passage to see the note icon. '
+                '(it may have been cleared). See Byali Debug Log for details. '
                 'Note text is shown below.'
             ),
             det_msg=note_text,
@@ -309,22 +440,37 @@ class ByaliAIViewerController(QObject):
         )
 
     def _after_replace(self, agent_name, original, result, ok):
-        if ok:
-            self.viewer.web_view.generic_action(
-                'show-status-message',
-                {'text': _('AI Agents: replaced selection with “{}” output').format(agent_name)},
-            )
-            return
-        info_dialog(
-            self.viewer,
-            _('AI rewrite ready'),
-            _(
-                'Could not replace the selection in the page (selection may have been cleared). '
-                'The AI output is shown below — you can copy it manually.'
-            ),
-            det_msg=result,
-            show=True,
+        debug_log.info(
+            'after replace callback',
+            session=self._session,
+            ok=ok,
+            ok_repr=repr(ok),
+            ok_type=type(ok).__name__,
+            agent=agent_name,
         )
+
+        def _done():
+            if ok:
+                self.viewer.web_view.generic_action(
+                    'show-status-message',
+                    {'text': _('AI Agents: replaced selection with “{}” output').format(agent_name)},
+                )
+                return
+            debug_log.error('replace FAILED — opening debug log', session=self._session)
+            self._open_debug_log()
+            info_dialog(
+                self.viewer,
+                _('AI rewrite ready'),
+                _(
+                    'Could not replace the selection in the page (selection may have been cleared). '
+                    'The AI output is shown below — you can copy it manually.\n\n'
+                    'Byali Debug Log is open with the detailed timeline — please Copy all and send it.'
+                ),
+                det_msg=result,
+                show=True,
+            )
+
+        self._drain_js_log(then=_done)
 
 
 def install_byali_ai_viewer_hook(viewer):

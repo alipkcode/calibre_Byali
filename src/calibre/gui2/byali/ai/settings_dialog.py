@@ -664,7 +664,20 @@ class ByaliAISettingsDialog(Dialog):
         self.tabs.addTab(self.agents_editor, _('AI Agents'))
         self.tabs.currentChanged.connect(self._tab_changed)
 
+        tools = QHBoxLayout()
+        layout.addLayout(tools)
+        self.debug_log_btn = QPushButton(_('Byali Debug Log…'), self)
+        self.debug_log_btn.setToolTip(_('View detailed AI rewrite / note attach diagnostics'))
+        self.debug_log_btn.clicked.connect(self._open_debug_log)
+        tools.addWidget(self.debug_log_btn)
+        tools.addStretch()
+
         layout.addWidget(self.bb)
+
+    def _open_debug_log(self):
+        from calibre.gui2.byali.ai.debug_log_dialog import ByaliDebugLogDialog
+
+        ByaliDebugLogDialog(self).exec()
 
     def _tab_changed(self, index: int):
         # Refresh cross-tab pickers when switching
