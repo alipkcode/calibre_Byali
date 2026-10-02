@@ -48,6 +48,9 @@ from calibre.gui2.byali.ai.connections import (
     test_connection,
     upsert_connection,
 )
+from calibre.gui2.byali.ai.network_library import KIND_DNS, KIND_PROXY, ensure_network_library_seeded
+from calibre.gui2.byali.ai.network_library_dialog import NetworkLibraryDialog
+from calibre.gui2.byali.ai.transport import TransportError
 from calibre.gui2.widgets import BusyCursor
 from calibre.gui2.widgets2 import Dialog
 from calibre.utils.localization import _
@@ -92,16 +95,47 @@ class ConnectionsEditor(QWidget):
         self.timeout_sb.setRange(15, 600)
         self.timeout_sb.setSuffix(_(' seconds'))
 
+        # DNS gate + Proxy URL (same pairing as PBE5 AI Connections)
+        self.dns_edit = QLineEdit(self)
+        self.dns_edit.setPlaceholderText(_('e.g. 8.8.8.8'))
+        self.dns_edit.setMaxLength(120)
+        self.dns_edit.setClearButtonEnabled(True)
+        dns_row = QHBoxLayout()
+        dns_row.addWidget(self.dns_edit, 1)
+        self.dns_lib_btn = QPushButton(_('Library'), self)
+        self.dns_lib_btn.setToolTip(_('Open DNS library'))
+        self.dns_lib_btn.clicked.connect(lambda: self._open_network_library(KIND_DNS))
+        dns_row.addWidget(self.dns_lib_btn)
+        dns_wrap = QWidget(self)
+        dns_wrap.setLayout(dns_row)
+
+        self.proxy_edit = QLineEdit(self)
+        self.proxy_edit.setPlaceholderText(_('e.g. http://host:8080'))
+        self.proxy_edit.setMaxLength(255)
+        self.proxy_edit.setClearButtonEnabled(True)
+        proxy_row = QHBoxLayout()
+        proxy_row.addWidget(self.proxy_edit, 1)
+        self.proxy_lib_btn = QPushButton(_('Library'), self)
+        self.proxy_lib_btn.setToolTip(_('Open proxy library'))
+        self.proxy_lib_btn.clicked.connect(lambda: self._open_network_library(KIND_PROXY))
+        proxy_row.addWidget(self.proxy_lib_btn)
+        proxy_wrap = QWidget(self)
+        proxy_wrap.setLayout(proxy_row)
+
         form.addRow(_('Name:'), self.name_edit)
         form.addRow(_('API &URL:'), self.url_edit)
         form.addRow(_('API &key:'), self.key_edit)
         form.addRow(_('HTTP &headers:'), self.headers_edit)
         form.addRow(_('&Timeout:'), self.timeout_sb)
+        form.addRow(_('DNS gate (optional):'), dns_wrap)
+        form.addRow(_('Proxy URL (optional):'), proxy_wrap)
 
         tip = QLabel(
             _(
                 'Each connection is an OpenAI-compatible endpoint. '
-                'Works with OpenAI, OpenRouter, Ollama (/v1), LM Studio, and similar gateways.'
+                'Works with OpenAI, OpenRouter, Ollama (/v1), LM Studio, and similar gateways.\n'
+                'DNS gate: resolve the provider hostname via this DNS server (leave empty for system DNS).\n'
+                'Proxy URL: tunnel through an HTTP, HTTPS, or SOCKS5 proxy (leave empty for a direct connection).'
             )
         )
         tip.setWordWrap(True)
@@ -131,7 +165,16 @@ class ConnectionsEditor(QWidget):
         right.addStretch()
 
         self._items: list[Connection] = []
+        ensure_network_library_seeded()
         self._reload_list()
+
+    def _open_network_library(self, kind: str):
+        d = NetworkLibraryDialog(kind, self)
+        if d.exec() and d.selected_value:
+            if kind == KIND_DNS:
+                self.dns_edit.setText(d.selected_value)
+            else:
+                self.proxy_edit.setText(d.selected_value)
 
     def _reload_list(self, select_id: str | None = None):
         self._items = load_connections()
@@ -172,6 +215,8 @@ class ConnectionsEditor(QWidget):
         self.key_edit.setText(conn.api_key)
         self.headers_edit.setPlainText('\n'.join(f'{a}: {b}' for a, b in conn.headers))
         self.timeout_sb.setValue(int(conn.timeout or 120))
+        self.dns_edit.setText(conn.dns_server or '')
+        self.proxy_edit.setText(conn.proxy_url or '')
         self._update_models_label(conn.cached_models)
         self.status.setText('')
 
@@ -191,6 +236,8 @@ class ConnectionsEditor(QWidget):
         conn.api_key = self.key_edit.text().strip()
         conn.headers = self._parse_headers()
         conn.timeout = self.timeout_sb.value()
+        conn.dns_server = self.dns_edit.text().strip()
+        conn.proxy_url = self.proxy_edit.text().strip()
         return conn
 
     def _add(self):
@@ -213,7 +260,11 @@ class ConnectionsEditor(QWidget):
         if not conn.api_url:
             error_dialog(self, _('Missing API URL'), _('Enter an API URL for this connection.'), show=True)
             return
-        upsert_connection(conn)
+        try:
+            upsert_connection(conn)
+        except TransportError as e:
+            error_dialog(self, _('Invalid networking'), str(e), show=True)
+            return
         self._reload_list(select_id=conn.id)
         self.status.setText(_('Connection saved.'))
 
@@ -222,7 +273,11 @@ class ConnectionsEditor(QWidget):
         if conn is None:
             return
         self._collect_into(conn)
-        upsert_connection(conn)
+        try:
+            upsert_connection(conn)
+        except TransportError as e:
+            error_dialog(self, _('Invalid networking'), str(e), show=True)
+            return
         with BusyCursor():
             try:
                 models = fetch_models(conn)
@@ -241,7 +296,11 @@ class ConnectionsEditor(QWidget):
         if conn is None:
             return
         self._collect_into(conn)
-        upsert_connection(conn)
+        try:
+            upsert_connection(conn)
+        except TransportError as e:
+            error_dialog(self, _('Invalid networking'), str(e), show=True)
+            return
         with BusyCursor():
             try:
                 msg = test_connection(conn)
@@ -251,7 +310,7 @@ class ConnectionsEditor(QWidget):
                 error_dialog(
                     self,
                     _('Connection test failed'),
-                    _('The API connection could not be verified. Check URL, key, and network.'),
+                    _('The API connection could not be verified. Check URL, key, proxy, DNS, and network.'),
                     det_msg=str(e),
                     show=True,
                 )

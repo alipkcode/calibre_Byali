@@ -17,6 +17,7 @@ from calibre.ai.prefs import override_prefs_for_providers
 from calibre.ai.utils import plugin_for_name
 from calibre.gui2.byali.ai.agents import Agent
 from calibre.gui2.byali.ai.connections import get_connection
+from calibre.gui2.byali.ai.transport import TransportError, use_connection_transport
 from calibre.utils.localization import _
 
 
@@ -81,15 +82,25 @@ def run_agent_on_text(agent: Agent, selected_text: str) -> str:
     }
     chunks: list[str] = []
     last_error = None
-    with override_prefs_for_providers(overrides):
-        for res in plugin.text_chat(messages, model):
-            if res.exception is not None:
-                last_error = res.exception
-                break
-            if res.content:
-                chunks.append(res.content)
+    try:
+        with use_connection_transport(connection.dns_server, connection.proxy_url):
+            with override_prefs_for_providers(overrides):
+                for res in plugin.text_chat(messages, model):
+                    if res.exception is not None:
+                        last_error = res.exception
+                        break
+                    if res.content:
+                        chunks.append(res.content)
+    except TransportError as e:
+        raise AgentRunError(str(e)) from e
     if last_error is not None:
-        raise AgentRunError(str(last_error))
+        msg = str(last_error)
+        if connection.proxy_url.strip():
+            msg = _(
+                'Could not reach the provider through the configured proxy. '
+                'Check the Proxy URL or try another proxy. Details: {0}'
+            ).format(msg)
+        raise AgentRunError(msg)
     text = ''.join(chunks).strip()
     if not text:
         raise AgentRunError(_('The AI returned an empty response.'))

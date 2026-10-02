@@ -3,20 +3,27 @@
 #
 # Blueprint:
 #   1) Connection dataclass (named OpenAI-compatible endpoints)
-#   2) CRUD in byali_ai JSONConfig (additive)
-#   3) fetch_models() via provider API
-#   4) test_connection() with clear error reporting
+#   2) Per-connection DNS gate + proxy URL (PBE5-compatible)
+#   3) CRUD in byali_ai JSONConfig (additive)
+#   4) fetch_models() / test_connection() via provider API + transport
 
 """Named LLM connections for Byali (multi-endpoint, API-loaded models)."""
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
 
 from calibre.ai.prefs import decode_secret, encode_secret
 from calibre.gui2.byali.ai.agents import prefs
+from calibre.gui2.byali.ai.network_library import remember_networking_in_library
+from calibre.gui2.byali.ai.transport import (
+    TransportError,
+    normalize_dns_server,
+    normalize_proxy_url,
+    use_connection_transport,
+)
 from calibre.utils.localization import _
 
 
@@ -29,6 +36,9 @@ class Connection:
     headers: list[list[str]] = field(default_factory=list)  # [[name, value], ...]
     timeout: int = 120
     cached_models: list[str] = field(default_factory=list)
+    # Optional per-connection networking (same semantics as PBE5 AI connections)
+    dns_server: str = ''  # e.g. "8.8.8.8" or "1.1.1.1:53"
+    proxy_url: str = ''  # e.g. "http://host:8080" or "socks5://host:1080"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -39,6 +49,8 @@ class Connection:
             'headers': [list(h) for h in self.headers if len(h) == 2],
             'timeout': int(self.timeout or 120),
             'cached_models': list(self.cached_models or []),
+            'dns_server': self.dns_server or '',
+            'proxy_url': self.proxy_url or '',
         }
 
     @classmethod
@@ -60,7 +72,15 @@ class Connection:
             headers=headers,
             timeout=int(data.get('timeout') or 120),
             cached_models=[str(x) for x in (data.get('cached_models') or [])],
+            dns_server=str(data.get('dns_server') or ''),
+            proxy_url=str(data.get('proxy_url') or ''),
         )
+
+    def normalized_networking(self) -> tuple[str, str]:
+        """Return (dns_server, proxy_url) normalised; blank → ''. Raises TransportError."""
+        dns = normalize_dns_server(self.dns_server) if self.dns_server.strip() else None
+        proxy = normalize_proxy_url(self.proxy_url) if self.proxy_url.strip() else None
+        return (dns or '', proxy or '')
 
     def headers_tuples(self) -> tuple[tuple[str, str], ...]:
         return tuple((a, b) for a, b in self.headers if a and b)
@@ -102,6 +122,10 @@ def save_connections(connections: list[Connection]) -> None:
 
 
 def upsert_connection(connection: Connection) -> None:
+    # Normalise networking on save (blank stays blank); raise on invalid
+    dns, proxy = connection.normalized_networking()
+    connection.dns_server = dns
+    connection.proxy_url = proxy
     items = load_connections()
     for i, existing in enumerate(items):
         if existing.id == connection.id:
@@ -110,6 +134,7 @@ def upsert_connection(connection: Connection) -> None:
     else:
         items.append(connection)
     save_connections(items)
+    remember_networking_in_library(connection.dns_server, connection.proxy_url)
 
 
 def delete_connection(connection_id: str) -> None:
@@ -142,7 +167,23 @@ def fetch_models(connection: Connection) -> list[str]:
     backend = plugin.builtin_live_module
     backend.get_available_models.cache_clear()
     encoded_key = encode_secret(connection.api_key) if connection.api_key else ''
-    models_dict = backend.get_available_models(connection.api_url.strip(), encoded_key, connection.headers_tuples())
+    try:
+        with use_connection_transport(connection.dns_server, connection.proxy_url):
+            models_dict = backend.get_available_models(
+                connection.api_url.strip(), encoded_key, connection.headers_tuples()
+            )
+    except TransportError:
+        raise
+    except Exception as e:
+        if connection.proxy_url.strip():
+            raise ValueError(
+                _(
+                    'Could not reach the provider through the configured proxy. '
+                    'Check the Proxy URL (use http://IP:PORT for most list proxies) or try another proxy. '
+                    'Details: {0}'
+                ).format(e)
+            ) from e
+        raise
     model_ids = sorted(models_dict, key=lambda x: x.lower())
     connection.cached_models = model_ids
     upsert_connection(connection)
@@ -167,14 +208,36 @@ def test_connection(connection: Connection, model: str = '') -> str:
     plugin = plugin_for_name(OpenAICompatible.name)
     overrides = {OpenAICompatible.name: connection.provider_prefs(model=use_model, temperature=0.0)}
     chunks: list[str] = []
-    with override_prefs_for_providers(overrides):
-        for res in plugin.text_chat((ChatMessage('Reply with exactly the word OK and nothing else.'),), use_model):
-            if res.exception is not None:
-                raise res.exception
-            if res.content:
-                chunks.append(res.content)
+    try:
+        with use_connection_transport(connection.dns_server, connection.proxy_url):
+            with override_prefs_for_providers(overrides):
+                for res in plugin.text_chat(
+                    (ChatMessage('Reply with exactly the word OK and nothing else.'),), use_model
+                ):
+                    if res.exception is not None:
+                        raise res.exception
+                    if res.content:
+                        chunks.append(res.content)
+    except TransportError:
+        raise
+    except Exception as e:
+        if connection.proxy_url.strip():
+            raise ValueError(
+                _(
+                    'Could not connect through the configured proxy. '
+                    'Check the Proxy URL or try another proxy. Details: {0}'
+                ).format(e)
+            ) from e
+        raise
     reply = ''.join(chunks).strip()
     sample = ', '.join(models[:3])
     extra = _(' (and more)') if len(models) > 3 else ''
     ok_note = _(' Chat test reply: {0}').format(reply[:80]) if reply else ''
-    return _('Connection OK. Found {0} models, e.g. {1}{2}.{3}').format(len(models), sample, extra, ok_note)
+    net_note = ''
+    if connection.proxy_url:
+        net_note = _(' Via proxy.')
+    elif connection.dns_server:
+        net_note = _(' Via DNS gate.')
+    return _('Connection OK. Found {0} models, e.g. {1}{2}.{3}{4}').format(
+        len(models), sample, extra, ok_note, net_note
+    )
