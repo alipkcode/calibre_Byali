@@ -34,6 +34,11 @@ def _format_user_prompt(template: str, selected: str) -> str:
 
 def _system_prompt_for_agent(agent: Agent) -> str:
     parts = [agent.system_prompt.strip()] if agent.system_prompt.strip() else []
+    if getattr(agent, 'is_note_agent', False):
+        parts.append(
+            'You are producing a reading annotation/note about the passage. '
+            'Do not return a rewritten copy of the passage. Return only the note.'
+        )
     match agent.reasoning_strategy:
         case 'none':
             parts.append('Respond directly without extended chain-of-thought. Return only the final text.')

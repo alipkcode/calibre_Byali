@@ -20,6 +20,9 @@ from calibre.utils.config import JSONConfig
 from calibre.utils.localization import _
 
 REASONING_CHOICES = ('auto', 'none', 'low', 'medium', 'high')
+OUTPUT_MODE_REPLACE = 'replace'
+OUTPUT_MODE_NOTE = 'note'
+OUTPUT_MODE_CHOICES = (OUTPUT_MODE_REPLACE, OUTPUT_MODE_NOTE)
 
 
 @dataclass
@@ -36,6 +39,8 @@ class Agent:
     temperature: float = 0.7
     reasoning_strategy: str = 'auto'
     allow_web_searches: bool = False
+    # replace = swap selection; note = keep text + attach AI note icon
+    output_mode: str = OUTPUT_MODE_REPLACE
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -45,6 +50,9 @@ class Agent:
         reasoning = str(data.get('reasoning_strategy') or 'auto')
         if reasoning not in REASONING_CHOICES:
             reasoning = 'auto'
+        mode = str(data.get('output_mode') or OUTPUT_MODE_REPLACE)
+        if mode not in OUTPUT_MODE_CHOICES:
+            mode = OUTPUT_MODE_REPLACE
         try:
             temperature = float(data.get('temperature', 0.7))
         except (TypeError, ValueError):
@@ -62,7 +70,12 @@ class Agent:
             temperature=temperature,
             reasoning_strategy=reasoning,
             allow_web_searches=bool(data.get('allow_web_searches', False)),
+            output_mode=mode,
         )
+
+    @property
+    def is_note_agent(self) -> bool:
+        return self.output_mode == OUTPUT_MODE_NOTE
 
 
 def default_agents() -> list[Agent]:
@@ -116,6 +129,22 @@ def default_agents() -> list[Agent]:
             ),
             user_template='Fix grammar and spelling in this passage:\n\n{selected}',
             builtin=True,
+            output_mode=OUTPUT_MODE_REPLACE,
+        ),
+        Agent(
+            id='byali-annotate-note',
+            name=_('Annotate (note)'),
+            system_prompt=(
+                'You write short reading notes for book passages. Clarify meaning, context, '
+                'allusions, or why the lines matter. Do NOT rewrite or replace the passage. '
+                'Return ONLY the note text (a few sentences).'
+            ),
+            user_template=(
+                'Write a helpful reading note for this selected passage. '
+                'Keep it concise and useful while reading:\n\n{selected}'
+            ),
+            builtin=True,
+            output_mode=OUTPUT_MODE_NOTE,
         ),
     ]
 
@@ -167,11 +196,25 @@ def delete_agent(agent_id: str) -> None:
     save_agents(kept)
 
 
-def new_agent_template() -> Agent:
+def new_agent_template(output_mode: str = OUTPUT_MODE_REPLACE) -> Agent:
     from calibre.gui2.byali.ai.connections import load_connections
 
     connections = load_connections()
     conn_id = connections[0].id if connections else ''
+    mode = output_mode if output_mode in OUTPUT_MODE_CHOICES else OUTPUT_MODE_REPLACE
+    if mode == OUTPUT_MODE_NOTE:
+        return Agent(
+            id=uuid4().hex,
+            name=_('New note agent'),
+            system_prompt=_(
+                'You write short reading notes for book passages. '
+                'Do not rewrite the passage. Return ONLY the note text.'
+            ),
+            user_template='Write a helpful reading note for:\n\n{selected}',
+            builtin=False,
+            connection_id=conn_id,
+            output_mode=OUTPUT_MODE_NOTE,
+        )
     return Agent(
         id=uuid4().hex,
         name=_('New agent'),
@@ -179,6 +222,7 @@ def new_agent_template() -> Agent:
         user_template='{selected}',
         builtin=False,
         connection_id=conn_id,
+        output_mode=OUTPUT_MODE_REPLACE,
     )
 
 

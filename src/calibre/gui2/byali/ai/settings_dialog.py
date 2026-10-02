@@ -33,6 +33,9 @@ from qt.core import (
 
 from calibre.gui2 import error_dialog, info_dialog
 from calibre.gui2.byali.ai.agents import (
+    OUTPUT_MODE_CHOICES,
+    OUTPUT_MODE_NOTE,
+    OUTPUT_MODE_REPLACE,
     REASONING_CHOICES,
     Agent,
     delete_agent,
@@ -456,7 +459,18 @@ class AgentsEditor(QWidget):
 
         self.web_search_cb = QCheckBox(_('Allow web search / up-to-date retrieval when available'), self)
 
+        self.output_mode_combo = QComboBox(self)
+        self.output_mode_combo.addItem(_('Replace selection (rewrite)'), OUTPUT_MODE_REPLACE)
+        self.output_mode_combo.addItem(_('Attach as note (keep text + icon)'), OUTPUT_MODE_NOTE)
+        self.output_mode_combo.setToolTip(
+            _(
+                'Replace: swaps the selected text with the agent output (with an undo “i” control).\n'
+                'Note: keeps the original passage and adds a note icon you can open while reading.'
+            )
+        )
+
         form.addRow(_('Name:'), self.name_edit)
+        form.addRow(_('&Output mode:'), self.output_mode_combo)
         form.addRow(_('System prompt:'), self.system_edit)
         form.addRow(_('User template:'), self.user_edit)
         form.addRow(_('LLM &connection:'), self.connection_combo)
@@ -465,7 +479,12 @@ class AgentsEditor(QWidget):
         form.addRow(_('&Reasoning effort:'), self.reasoning_combo)
         form.addRow('', self.web_search_cb)
 
-        tip = QLabel(_('Model / temperature / reasoning / search are configured per agent. Connections are shared.'))
+        tip = QLabel(
+            _(
+                'Model / temperature / reasoning / search are configured per agent. Connections are shared.\n'
+                'Note agents never rewrite the page — they save a note and show an “N” icon on the passage.'
+            )
+        )
         tip.setWordWrap(True)
         right.addWidget(tip)
 
@@ -474,7 +493,8 @@ class AgentsEditor(QWidget):
         self.add_btn = QPushButton(_('Add agent'), self)
         self.save_btn = QPushButton(_('Save agent'), self)
         self.del_btn = QPushButton(_('Delete / disable'), self)
-        self.add_btn.clicked.connect(self._add)
+        self.add_btn.setToolTip(_('Add a rewrite agent or a note agent'))
+        self.add_btn.clicked.connect(self._show_add_menu)
         self.save_btn.clicked.connect(self._save_current)
         self.del_btn.clicked.connect(self._delete_current)
         buttons.addWidget(self.add_btn)
@@ -508,7 +528,10 @@ class AgentsEditor(QWidget):
         self.list.clear()
         select_row = 0
         for i, agent in enumerate(self._agents):
-            label = agent.name + ('' if agent.enabled else f' ({_("disabled")})')
+            kind = _('note') if agent.is_note_agent else _('rewrite')
+            label = f'{agent.name} [{kind}]'
+            if not agent.enabled:
+                label += f' ({_("disabled")})'
             item = QListWidgetItem(label)
             item.setData(Qt.ItemDataRole.UserRole, agent.id)
             self.list.addItem(item)
@@ -570,6 +593,8 @@ class AgentsEditor(QWidget):
         self.name_edit.setText(agent.name)
         self.system_edit.setPlainText(agent.system_prompt)
         self.user_edit.setPlainText(agent.user_template)
+        mode_idx = self.output_mode_combo.findData(agent.output_mode)
+        self.output_mode_combo.setCurrentIndex(max(0, mode_idx))
         self._fill_connections(select_id=agent.connection_id or None)
         self._populate_models_from_connection(preferred_model=agent.model)
         self.temp_sb.setValue(float(agent.temperature))
@@ -577,8 +602,14 @@ class AgentsEditor(QWidget):
         self.reasoning_combo.setCurrentIndex(max(0, idx))
         self.web_search_cb.setChecked(bool(agent.allow_web_searches))
 
-    def _add(self):
-        agent = new_agent_template()
+    def _show_add_menu(self):
+        menu = QMenu(self)
+        menu.addAction(_('Rewrite agent…'), lambda: self._add(OUTPUT_MODE_REPLACE))
+        menu.addAction(_('Note agent…'), lambda: self._add(OUTPUT_MODE_NOTE))
+        menu.exec(self.add_btn.mapToGlobal(QPoint(0, self.add_btn.height())))
+
+    def _add(self, output_mode: str = OUTPUT_MODE_REPLACE):
+        agent = new_agent_template(output_mode=output_mode)
         upsert_agent(agent)
         self._reload_list(select_id=agent.id)
 
@@ -589,6 +620,10 @@ class AgentsEditor(QWidget):
         agent.name = self.name_edit.text().strip() or agent.name
         agent.system_prompt = self.system_edit.toPlainText()
         agent.user_template = self.user_edit.toPlainText() or '{selected}'
+        mode = self.output_mode_combo.currentData() or OUTPUT_MODE_REPLACE
+        if mode not in OUTPUT_MODE_CHOICES:
+            mode = OUTPUT_MODE_REPLACE
+        agent.output_mode = mode
         agent.enabled = True
         agent.connection_id = self.connection_combo.currentData() or ''
         agent.model = self.model_combo.currentText().strip()
