@@ -367,6 +367,8 @@ def create_defs():
             None,
             'Remove Books',
             'Tweak ePub',
+            None,
+            'Duplicate Books',
         )
         defs['action-layout-toolbar-device'] = (
             'Add Books',
@@ -408,6 +410,8 @@ def create_defs():
             'Save To Disk',
             'Connect Share',
             'Tweak ePub',
+            None,
+            'Duplicate Books',
         )
         defs['action-layout-toolbar-device'] = (
             'Add Books',
@@ -450,6 +454,8 @@ def create_defs():
         'Similar Books',
         'Tweak ePub',
         None,
+        'Duplicate Books',
+        None,
         'Remove Books',
     )
 
@@ -466,6 +472,8 @@ def create_defs():
         'Show Book Details',
         'Similar Books',
         'Tweak ePub',
+        None,
+        'Duplicate Books',
         None,
         'Remove Books',
     )

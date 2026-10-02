@@ -1174,6 +1174,13 @@ class ActionMarkBooks(InterfaceActionBase):
     description = _('Temporarily mark books')
 
 
+class ActionDuplicateBooks(InterfaceActionBase):
+    name = 'Duplicate Books'
+    author = 'calibre_Byali'
+    actual_plugin = 'calibre.gui2.actions.duplicate_books:DuplicateBooksAction'
+    description = _('Duplicate selected books as editable copies labeled Duplicated')
+
+
 class ActionManageCategories(InterfaceActionBase):
     name = 'Manage categories'
     author = 'Charles Haley'
@@ -1295,6 +1302,7 @@ plugins += [
     ActionEditToC,
     ActionSortBy,
     ActionMarkBooks,
+    ActionDuplicateBooks,
     ActionEmbed,
     ActionTemplateTester,
     ActionTagMapper,
