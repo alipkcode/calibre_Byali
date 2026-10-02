@@ -369,6 +369,7 @@ def create_defs():
             'Tweak ePub',
             None,
             'Duplicate Books',
+            'Byali AI',
         )
         defs['action-layout-toolbar-device'] = (
             'Add Books',
@@ -412,6 +413,7 @@ def create_defs():
             'Tweak ePub',
             None,
             'Duplicate Books',
+            'Byali AI',
         )
         defs['action-layout-toolbar-device'] = (
             'Add Books',

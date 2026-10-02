@@ -19,7 +19,8 @@ SOURCE_IDENTIFIER = 'byali_source'
 
 # --- Interface action names (must match InterfaceActionBase.name / action.name) ---
 DUPLICATE_ACTION_NAME = 'Duplicate Books'
+AI_SETTINGS_ACTION_NAME = 'Byali AI'
 
 # Ordered list of Byali toolbar actions. Future Byali actions append here so
 # ensure_byali_toolbar_section() places them in one separated header section.
-BYALI_TOOLBAR_ACTIONS = (DUPLICATE_ACTION_NAME,)
+BYALI_TOOLBAR_ACTIONS = (DUPLICATE_ACTION_NAME, AI_SETTINGS_ACTION_NAME)

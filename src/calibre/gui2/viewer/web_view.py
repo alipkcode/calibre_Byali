@@ -40,6 +40,7 @@ from calibre.constants import DEBUG, FAKE_HOST, FAKE_PROTOCOL, __version__, in_d
 from calibre.ebooks.metadata.book.base import field_metadata
 from calibre.ebooks.oeb.polish.utils import guess_type
 from calibre.gui2 import choose_images, config, error_dialog, qapplication_or_fail, safe_open_url
+from calibre.gui2.byali.ai.replace_js import BYALI_VIEWER_HELPER_JS
 from calibre.gui2.viewer import link_prefix_for_location_links, performance_monitor, url_for_book_in_library
 from calibre.gui2.viewer.config import get_session_pref, load_viewer_profiles, save_viewer_profile, viewer_config_dir, vprefs
 from calibre.gui2.viewer.tts import TTS
@@ -248,6 +249,7 @@ window.calibre_translations_data = {translations_json};
             ans,
             create_script(name='translations.js', src=js),
             create_script(name='viewer.js', path=P('viewer.js', allow_user_override=False)),
+            create_script(name='byali-viewer-helper.js', src=BYALI_VIEWER_HELPER_JS),
         )
         url_handler = UrlSchemeHandler(ans)
         ans.installUrlSchemeHandler(QByteArray(FAKE_PROTOCOL.encode('ascii')), url_handler)

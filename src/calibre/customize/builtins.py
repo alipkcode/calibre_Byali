@@ -1181,6 +1181,13 @@ class ActionDuplicateBooks(InterfaceActionBase):
     description = _('Duplicate selected books as editable copies labeled Duplicated')
 
 
+class ActionByaliAI(InterfaceActionBase):
+    name = 'Byali AI'
+    author = 'calibre_Byali'
+    actual_plugin = 'calibre.gui2.actions.byali_ai_settings:ByaliAISettingsAction'
+    description = _('Configure LLM APIs and Byali rewrite agents for the ebook viewer')
+
+
 class ActionManageCategories(InterfaceActionBase):
     name = 'Manage categories'
     author = 'Charles Haley'
@@ -1303,6 +1310,7 @@ plugins += [
     ActionSortBy,
     ActionMarkBooks,
     ActionDuplicateBooks,
+    ActionByaliAI,
     ActionEmbed,
     ActionTemplateTester,
     ActionTagMapper,

@@ -187,6 +187,9 @@ def run_gui(app, opts, args, internal_book_data, listener=None):
         force_reload=opts.force_reload,
         calibre_book_data=internal_book_data,
     )
+    from calibre.gui2.byali.ai.viewer_hook import install_byali_ai_viewer_hook
+
+    install_byali_ai_viewer_hook(main)
     main.set_exception_handler()
     app.shutdown_signal_received.connect(main.request_close)
     if len(args) > 1:
