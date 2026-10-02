@@ -83,7 +83,7 @@ def run_agent_on_text(agent: Agent, selected_text: str) -> str:
     chunks: list[str] = []
     last_error = None
     try:
-        with use_connection_transport(connection.dns_server, connection.proxy_url):
+        with use_connection_transport(connection.dns_server, connection.effective_proxy_url()):
             with override_prefs_for_providers(overrides):
                 for res in plugin.text_chat(messages, model):
                     if res.exception is not None:
@@ -95,10 +95,10 @@ def run_agent_on_text(agent: Agent, selected_text: str) -> str:
         raise AgentRunError(str(e)) from e
     if last_error is not None:
         msg = str(last_error)
-        if connection.proxy_url.strip():
+        if connection.effective_proxy_url():
             msg = _(
                 'Could not reach the provider through the configured proxy. '
-                'Check the Proxy URL or try another proxy. Details: {0}'
+                'Check the Proxies tab or try another approved proxy. Details: {0}'
             ).format(msg)
         raise AgentRunError(msg)
     text = ''.join(chunks).strip()

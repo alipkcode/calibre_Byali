@@ -2,9 +2,9 @@
 # License: GPLv3 Copyright: 2026, Ali / calibre_Byali
 #
 # Blueprint:
-#   Tab 1 — ConnectionsEditor: multiple OpenAI-compatible endpoints,
-#            refresh models from API, Test connection button
-#   Tab 2 — AgentsEditor: prompts + per-agent connection/model/temp/reasoning/search
+#   Tab 1 — ConnectionsEditor: OpenAI-compatible endpoints + Use-proxy checkbox
+#   Tab 2 — ProxiesEditor: test proxies (PBE5 two-step) + approve named presets
+#   Tab 3 — AgentsEditor: prompts + per-agent connection/model/temp/reasoning/search
 
 """Settings dialog for Byali multi-connection LLM setup and rewrite agents."""
 
@@ -55,8 +55,13 @@ from calibre.gui2.byali.ai.connections import (
     test_connection,
     upsert_connection,
 )
-from calibre.gui2.byali.ai.network_library import KIND_DNS, KIND_PROXY, ensure_network_library_seeded
+from calibre.gui2.byali.ai.network_library import KIND_DNS, ensure_network_library_seeded
 from calibre.gui2.byali.ai.network_library_dialog import NetworkLibraryDialog
+from calibre.gui2.byali.ai.proxies_editor import ProxiesEditor
+from calibre.gui2.byali.ai.proxy_presets import (
+    ensure_legacy_proxy_migrated,
+    list_approved_proxy_presets,
+)
 from calibre.gui2.byali.ai.transport import TransportError
 from calibre.gui2.widgets import BusyCursor
 from calibre.gui2.widgets2 import Dialog
@@ -103,7 +108,7 @@ class ConnectionsEditor(QWidget):
         self.timeout_sb.setRange(15, 600)
         self.timeout_sb.setSuffix(_(' seconds'))
 
-        # DNS gate + Proxy URL (same pairing as PBE5 AI Connections)
+        # DNS gate (optional) — still per-connection
         self.dns_edit = QLineEdit(self)
         self.dns_edit.setPlaceholderText(_('e.g. 8.8.8.8'))
         self.dns_edit.setMaxLength(120)
@@ -117,18 +122,14 @@ class ConnectionsEditor(QWidget):
         dns_wrap = QWidget(self)
         dns_wrap.setLayout(dns_row)
 
-        self.proxy_edit = QLineEdit(self)
-        self.proxy_edit.setPlaceholderText(_('e.g. http://host:8080'))
-        self.proxy_edit.setMaxLength(255)
-        self.proxy_edit.setClearButtonEnabled(True)
-        proxy_row = QHBoxLayout()
-        proxy_row.addWidget(self.proxy_edit, 1)
-        self.proxy_lib_btn = QPushButton(_('Library'), self)
-        self.proxy_lib_btn.setToolTip(_('Open proxy library'))
-        self.proxy_lib_btn.clicked.connect(lambda: self._open_network_library(KIND_PROXY))
-        proxy_row.addWidget(self.proxy_lib_btn)
-        proxy_wrap = QWidget(self)
-        proxy_wrap.setLayout(proxy_row)
+        # Proxy: checkbox + approved presets from the Proxies tab
+        self.use_proxy_cb = QCheckBox(_('Use a proxy for this LLM connection'), self)
+        self.use_proxy_cb.toggled.connect(self._on_use_proxy_toggled)
+        self.proxy_preset_combo = QComboBox(self)
+        self.proxy_preset_combo.setEnabled(False)
+        self.proxy_preset_combo.setToolTip(
+            _('Only proxies that were tested green and approved with a preset name on the Proxies tab.')
+        )
 
         form.addRow(_('Name:'), self.name_edit)
         form.addRow(_('API &URL:'), self.url_edit)
@@ -136,14 +137,15 @@ class ConnectionsEditor(QWidget):
         form.addRow(_('HTTP &headers:'), self.headers_edit)
         form.addRow(_('&Timeout:'), self.timeout_sb)
         form.addRow(_('DNS gate (optional):'), dns_wrap)
-        form.addRow(_('Proxy URL (optional):'), proxy_wrap)
+        form.addRow(self.use_proxy_cb)
+        form.addRow(_('Proxy preset:'), self.proxy_preset_combo)
 
         tip = QLabel(
             _(
                 'Each connection is an OpenAI-compatible endpoint. '
                 'Works with OpenAI, OpenRouter, Ollama (/v1), LM Studio, and similar gateways.\n'
                 'DNS gate: resolve the provider hostname via this DNS server (leave empty for system DNS).\n'
-                'Proxy URL: tunnel through an HTTP, HTTPS, or SOCKS5 proxy (leave empty for a direct connection).'
+                'Proxy: manage and test proxies on the Proxies tab, then enable the checkbox and pick an approved preset.'
             )
         )
         tip.setWordWrap(True)
@@ -174,6 +176,7 @@ class ConnectionsEditor(QWidget):
 
         self._items: list[Connection] = []
         ensure_network_library_seeded()
+        self.refresh_proxy_presets()
         self._reload_list()
 
     def _open_network_library(self, kind: str):
@@ -181,8 +184,25 @@ class ConnectionsEditor(QWidget):
         if d.exec() and d.selected_value:
             if kind == KIND_DNS:
                 self.dns_edit.setText(d.selected_value)
-            else:
-                self.proxy_edit.setText(d.selected_value)
+
+    def refresh_proxy_presets(self, keep_id: str | None = None):
+        """Reload approved proxy presets into the connection picker."""
+        current = keep_id if keep_id is not None else self.proxy_preset_combo.currentData()
+        self.proxy_preset_combo.blockSignals(True)
+        self.proxy_preset_combo.clear()
+        self.proxy_preset_combo.addItem(_('(select an approved proxy)'), '')
+        for preset in list_approved_proxy_presets():
+            self.proxy_preset_combo.addItem(f'{preset.name} — {preset.proxy_url}', preset.id)
+        self.proxy_preset_combo.blockSignals(False)
+        if current:
+            idx = self.proxy_preset_combo.findData(current)
+            if idx >= 0:
+                self.proxy_preset_combo.setCurrentIndex(idx)
+
+    def _on_use_proxy_toggled(self, checked: bool):
+        self.proxy_preset_combo.setEnabled(bool(checked))
+        if checked:
+            self.refresh_proxy_presets()
 
     def _reload_list(self, select_id: str | None = None):
         self._items = load_connections()
@@ -224,7 +244,19 @@ class ConnectionsEditor(QWidget):
         self.headers_edit.setPlainText('\n'.join(f'{a}: {b}' for a, b in conn.headers))
         self.timeout_sb.setValue(int(conn.timeout or 120))
         self.dns_edit.setText(conn.dns_server or '')
-        self.proxy_edit.setText(conn.proxy_url or '')
+        # Migrate legacy raw proxy_url into an approved preset once
+        preset_id = conn.proxy_preset_id or ''
+        if conn.use_proxy and not preset_id and conn.proxy_url.strip():
+            migrated = ensure_legacy_proxy_migrated(conn.proxy_url, suggested_name=conn.name or _('Migrated proxy'))
+            if migrated is not None:
+                preset_id = migrated.id
+                conn.proxy_preset_id = migrated.id
+                conn.use_proxy = True
+        self.refresh_proxy_presets(keep_id=preset_id)
+        self.use_proxy_cb.blockSignals(True)
+        self.use_proxy_cb.setChecked(bool(conn.use_proxy))
+        self.use_proxy_cb.blockSignals(False)
+        self.proxy_preset_combo.setEnabled(bool(conn.use_proxy))
         self._update_models_label(conn.cached_models)
         self.status.setText('')
 
@@ -245,7 +277,10 @@ class ConnectionsEditor(QWidget):
         conn.headers = self._parse_headers()
         conn.timeout = self.timeout_sb.value()
         conn.dns_server = self.dns_edit.text().strip()
-        conn.proxy_url = self.proxy_edit.text().strip()
+        conn.use_proxy = self.use_proxy_cb.isChecked()
+        conn.proxy_preset_id = self.proxy_preset_combo.currentData() or ''
+        if not conn.use_proxy:
+            conn.proxy_preset_id = ''
         return conn
 
     def _show_add_menu(self):
@@ -587,6 +622,9 @@ class ByaliAISettingsDialog(Dialog):
         self.connections_editor = ConnectionsEditor(self)
         self.tabs.addTab(self.connections_editor, _('LLM connections'))
 
+        self.proxies_editor = ProxiesEditor(self)
+        self.tabs.addTab(self.proxies_editor, _('Proxies'))
+
         self.agents_editor = AgentsEditor(self)
         self.tabs.addTab(self.agents_editor, _('AI Agents'))
         self.tabs.currentChanged.connect(self._tab_changed)
@@ -594,8 +632,13 @@ class ByaliAISettingsDialog(Dialog):
         layout.addWidget(self.bb)
 
     def _tab_changed(self, index: int):
-        if index == 1:
+        # Refresh cross-tab pickers when switching
+        if self.tabs.widget(index) is self.agents_editor:
             self.agents_editor.refresh_connection_list()
+        elif self.tabs.widget(index) is self.connections_editor:
+            self.connections_editor.refresh_proxy_presets()
+        elif self.tabs.widget(index) is self.proxies_editor:
+            self.proxies_editor.refresh_probe_connections()
 
     def accept(self):
         self.connections_editor._save_current()

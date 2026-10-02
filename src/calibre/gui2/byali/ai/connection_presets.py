@@ -149,6 +149,8 @@ def connection_from_preset(preset: ConnectionPreset) -> Connection:
         cached_models=[],
         dns_server='',
         proxy_url='',
+        use_proxy=False,
+        proxy_preset_id='',
     )
 
 

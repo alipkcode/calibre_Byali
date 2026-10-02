@@ -3,7 +3,7 @@
 #
 # Blueprint:
 #   1) Connection dataclass (named OpenAI-compatible endpoints)
-#   2) Per-connection DNS gate + proxy URL (PBE5-compatible)
+#   2) Optional DNS gate + approved proxy preset (checkbox on connection)
 #   3) CRUD in byali_ai JSONConfig (additive)
 #   4) fetch_models() / test_connection() via provider API + transport
 
@@ -36,9 +36,12 @@ class Connection:
     headers: list[list[str]] = field(default_factory=list)  # [[name, value], ...]
     timeout: int = 120
     cached_models: list[str] = field(default_factory=list)
-    # Optional per-connection networking (same semantics as PBE5 AI connections)
+    # Optional per-connection networking
     dns_server: str = ''  # e.g. "8.8.8.8" or "1.1.1.1:53"
-    proxy_url: str = ''  # e.g. "http://host:8080" or "socks5://host:1080"
+    # Legacy raw proxy URL (kept for migration / mirror of selected preset)
+    proxy_url: str = ''
+    use_proxy: bool = False
+    proxy_preset_id: str = ''  # approved preset from the Proxies tab
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -51,6 +54,8 @@ class Connection:
             'cached_models': list(self.cached_models or []),
             'dns_server': self.dns_server or '',
             'proxy_url': self.proxy_url or '',
+            'use_proxy': bool(self.use_proxy),
+            'proxy_preset_id': self.proxy_preset_id or '',
         }
 
     @classmethod
@@ -64,6 +69,12 @@ class Connection:
         for item in data.get('headers') or []:
             if isinstance(item, (list, tuple)) and len(item) == 2:
                 headers.append([str(item[0]), str(item[1])])
+        proxy_url = str(data.get('proxy_url') or '')
+        use_proxy = bool(data.get('use_proxy', False))
+        proxy_preset_id = str(data.get('proxy_preset_id') or '')
+        # Legacy: raw proxy_url without the new fields → treat as enabled
+        if proxy_url.strip() and 'use_proxy' not in data and not proxy_preset_id:
+            use_proxy = True
         return cls(
             id=str(data.get('id') or uuid4().hex),
             name=str(data.get('name') or _('Unnamed connection')),
@@ -73,13 +84,28 @@ class Connection:
             timeout=int(data.get('timeout') or 120),
             cached_models=[str(x) for x in (data.get('cached_models') or [])],
             dns_server=str(data.get('dns_server') or ''),
-            proxy_url=str(data.get('proxy_url') or ''),
+            proxy_url=proxy_url,
+            use_proxy=use_proxy,
+            proxy_preset_id=proxy_preset_id,
         )
+
+    def effective_proxy_url(self) -> str:
+        """Proxy used for transport: approved preset when use_proxy is on, else none."""
+        if not self.use_proxy:
+            return ''
+        if self.proxy_preset_id:
+            from calibre.gui2.byali.ai.proxy_presets import get_proxy_preset
+
+            preset = get_proxy_preset(self.proxy_preset_id)
+            if preset is not None and preset.approved and preset.proxy_url.strip():
+                return preset.proxy_url.strip()
+        return (self.proxy_url or '').strip()
 
     def normalized_networking(self) -> tuple[str, str]:
         """Return (dns_server, proxy_url) normalised; blank → ''. Raises TransportError."""
         dns = normalize_dns_server(self.dns_server) if self.dns_server.strip() else None
-        proxy = normalize_proxy_url(self.proxy_url) if self.proxy_url.strip() else None
+        proxy_raw = self.effective_proxy_url()
+        proxy = normalize_proxy_url(proxy_raw) if proxy_raw else None
         return (dns or '', proxy or '')
 
     def headers_tuples(self) -> tuple[tuple[str, str], ...]:
@@ -122,10 +148,16 @@ def save_connections(connections: list[Connection]) -> None:
 
 
 def upsert_connection(connection: Connection) -> None:
-    # Normalise networking on save (blank stays blank); raise on invalid
+    # Normalise DNS; resolve proxy from approved preset when enabled
     dns, proxy = connection.normalized_networking()
     connection.dns_server = dns
-    connection.proxy_url = proxy
+    if connection.use_proxy:
+        if not proxy:
+            raise TransportError(
+                _('Use proxy is enabled, but no approved proxy preset is selected. '
+                  'Open the Proxies tab, test & approve a proxy, then choose it here.')
+            )
+        connection.proxy_url = proxy
     items = load_connections()
     for i, existing in enumerate(items):
         if existing.id == connection.id:
@@ -134,7 +166,7 @@ def upsert_connection(connection: Connection) -> None:
     else:
         items.append(connection)
     save_connections(items)
-    remember_networking_in_library(connection.dns_server, connection.proxy_url)
+    remember_networking_in_library(connection.dns_server, connection.effective_proxy_url())
 
 
 def delete_connection(connection_id: str) -> None:
@@ -168,18 +200,18 @@ def fetch_models(connection: Connection) -> list[str]:
     backend.get_available_models.cache_clear()
     encoded_key = encode_secret(connection.api_key) if connection.api_key else ''
     try:
-        with use_connection_transport(connection.dns_server, connection.proxy_url):
+        with use_connection_transport(connection.dns_server, connection.effective_proxy_url()):
             models_dict = backend.get_available_models(
                 connection.api_url.strip(), encoded_key, connection.headers_tuples()
             )
     except TransportError:
         raise
     except Exception as e:
-        if connection.proxy_url.strip():
+        if connection.effective_proxy_url():
             raise ValueError(
                 _(
                     'Could not reach the provider through the configured proxy. '
-                    'Check the Proxy URL (use http://IP:PORT for most list proxies) or try another proxy. '
+                    'Check the Proxies tab (use http://IP:PORT for most list proxies) or try another proxy. '
                     'Details: {0}'
                 ).format(e)
             ) from e
@@ -209,7 +241,7 @@ def test_connection(connection: Connection, model: str = '') -> str:
     overrides = {OpenAICompatible.name: connection.provider_prefs(model=use_model, temperature=0.0)}
     chunks: list[str] = []
     try:
-        with use_connection_transport(connection.dns_server, connection.proxy_url):
+        with use_connection_transport(connection.dns_server, connection.effective_proxy_url()):
             with override_prefs_for_providers(overrides):
                 for res in plugin.text_chat(
                     (ChatMessage('Reply with exactly the word OK and nothing else.'),), use_model
@@ -221,11 +253,11 @@ def test_connection(connection: Connection, model: str = '') -> str:
     except TransportError:
         raise
     except Exception as e:
-        if connection.proxy_url.strip():
+        if connection.effective_proxy_url():
             raise ValueError(
                 _(
                     'Could not connect through the configured proxy. '
-                    'Check the Proxy URL or try another proxy. Details: {0}'
+                    'Check the Proxies tab or try another approved proxy. Details: {0}'
                 ).format(e)
             ) from e
         raise
@@ -234,7 +266,7 @@ def test_connection(connection: Connection, model: str = '') -> str:
     extra = _(' (and more)') if len(models) > 3 else ''
     ok_note = _(' Chat test reply: {0}').format(reply[:80]) if reply else ''
     net_note = ''
-    if connection.proxy_url:
+    if connection.effective_proxy_url():
         net_note = _(' Via proxy.')
     elif connection.dns_server:
         net_note = _(' Via DNS gate.')
