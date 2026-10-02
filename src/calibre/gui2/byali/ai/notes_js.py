@@ -11,12 +11,11 @@
 
 BYALI_NOTES_HELPER_JS = r'''
 (function () {
-  if (window.__byali_notes_helper__) return;
-  window.__byali_notes_helper__ = true;
+  // Reinstall functions each time (profile + runjs reinject).
+  window.__byaliDeletedNotes = window.__byaliDeletedNotes || [];
 
   var STYLE_ID = 'byali-notes-style';
   var POP_ID = 'byali-note-popover';
-  window.__byaliDeletedNotes = window.__byaliDeletedNotes || [];
 
   var CSS = [
     '.byali-note-mark{display:inline;background:rgba(255,193,7,.10);border-bottom:1px dashed rgba(255,167,38,.95);border-radius:.12em;padding:0 .04em;}',
@@ -250,45 +249,71 @@ BYALI_NOTES_HELPER_JS = r'''
     return false;
   }
 
-  window.byaliAttachNoteToSelection = function (anchorText, note, meta) {
+  window.byaliAttachNoteInThisDocument = function (anchorText, note, meta) {
     meta = meta || {};
-    var docs = bookDocs();
-    for (var i = 0; i < docs.length; i++) {
-      var doc = docs[i];
-      var sel = doc.getSelection ? doc.getSelection() : null;
-      if (!sel || !sel.rangeCount) continue;
+    var doc = document;
+    ensureStyleInDoc(doc);
+    var sel = window.getSelection ? window.getSelection() : null;
+    if (sel && sel.rangeCount) {
       var range = sel.getRangeAt(0);
       var selected = range.toString();
-      if (!selected) continue;
-      try {
-        var mark = buildMark(doc, anchorText || selected, note, meta);
-        range.deleteContents();
-        range.insertNode(mark);
-        sel.removeAllRanges();
-        return true;
-      } catch (e) {}
-    }
-    // Fallback: search for anchor text
-    for (var j = 0; j < docs.length; j++) {
-      if (findAndWrap(docs[j], {id: meta.id, anchor_text: anchorText || '', note: note, agent_name: meta.agent_name, created_at: meta.created_at})) {
-        return true;
+      if (selected) {
+        try {
+          var mark = buildMark(doc, anchorText || selected, note, meta);
+          range.deleteContents();
+          range.insertNode(mark);
+          sel.removeAllRanges();
+          return true;
+        } catch (e) {}
       }
     }
-    return false;
+    return findAndWrap(doc, {
+      id: meta.id,
+      anchor_text: anchorText || '',
+      note: note,
+      agent_name: meta.agent_name,
+      created_at: meta.created_at
+    });
+  };
+
+  window.byaliAttachNoteToSelection = function (anchorText, note, meta) {
+    // Prefer the async top-frame starter when present (postMessage to iframes).
+    if (window === window.top && window.byaliStartAttachNote) {
+      return window.byaliStartAttachNote(anchorText, note, meta);
+    }
+    return window.byaliAttachNoteInThisDocument(anchorText, note, meta);
   };
 
   window.byaliRestoreNotes = function (notes) {
     notes = notes || [];
-    var docs = bookDocs();
     var ok = 0;
     for (var n = 0; n < notes.length; n++) {
-      var noteObj = notes[n] || {};
-      for (var i = 0; i < docs.length; i++) {
-        if (findAndWrap(docs[i], noteObj)) { ok++; break; }
+      if (findAndWrap(document, notes[n] || {})) ok++;
+    }
+    // Ask iframes to restore too (parent cannot read their DOM)
+    if (window === window.top) {
+      var frames = document.querySelectorAll('iframe');
+      for (var i = 0; i < frames.length; i++) {
+        try {
+          frames[i].contentWindow.postMessage({ __byali: 'byali-notes-restore', notes: notes }, '*');
+        } catch (e) {}
       }
     }
     return ok;
   };
+
+  if (!window.__byali_notes_restore_hook__) {
+    window.__byali_notes_restore_hook__ = true;
+    window.addEventListener('message', function (ev) {
+      var data = ev && ev.data;
+      if (!data || data.__byali !== 'byali-notes-restore') return;
+      if (window === window.top) return;
+      var notes = data.notes || [];
+      for (var n = 0; n < notes.length; n++) {
+        try { findAndWrap(document, notes[n] || {}); } catch (e) {}
+      }
+    }, false);
+  }
 
   window.byaliDrainDeletedNotes = function () {
     var d = window.__byaliDeletedNotes || [];
@@ -297,5 +322,6 @@ BYALI_NOTES_HELPER_JS = r'''
   };
 
   ensureHostStyle();
+  window.__byali_notes_helper__ = true;
 })();
 '''

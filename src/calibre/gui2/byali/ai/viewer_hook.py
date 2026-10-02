@@ -153,8 +153,25 @@ class ByaliAIViewerController(QObject):
             has_annot=annot is not None,
         )
 
+    def _ensure_profile_scripts(self):
+        """Refresh QWebEngineProfile scripts so book iframes get the latest helpers."""
+        try:
+            from calibre.gui2.viewer.web_view import create_profile
+            from calibre.utils.webengine import create_script, insert_scripts
+
+            profile = create_profile()
+            insert_scripts(
+                profile,
+                create_script(name='byali-viewer-helper.js', src=BYALI_VIEWER_HELPER_JS),
+                create_script(name='byali-notes-helper.js', src=BYALI_NOTES_HELPER_JS),
+            )
+            debug_log.debug('profile Byali scripts re-inserted for subframes')
+        except Exception as e:
+            debug_log.exception('profile script re-insert failed', e)
+
     def _inject_helper(self, *args):
         debug_log.debug('inject helpers')
+        self._ensure_profile_scripts()
         try:
             self._runjs(BYALI_VIEWER_HELPER_JS)
             self._runjs(BYALI_NOTES_HELPER_JS)
@@ -357,7 +374,7 @@ class ByaliAIViewerController(QObject):
 
         rid = uuid4().hex
         debug_log.info(
-            'calling byaliReplaceSelection',
+            'calling byaliStartReplace (iframe postMessage)',
             session=self._session,
             rid=rid,
             original_len=len(original or ''),
@@ -368,16 +385,105 @@ class ByaliAIViewerController(QObject):
         i = json.dumps(rid)
         js = (
             '(function(){ try { '
-            'if (!window.byaliReplaceSelection) { '
-            'window.byaliLog && window.byaliLog("ERROR","byaliReplaceSelection missing"); '
-            'return false; } '
-            f'return window.byaliReplaceSelection({o}, {r}, {i}); '
+            'if (!window.byaliStartReplace) { '
+            'window.byaliLog && window.byaliLog("ERROR","byaliStartReplace missing"); '
+            'return {done:true,ok:false,via:"missing"}; } '
+            f'var v = window.byaliStartReplace({o}, {r}, {i}); '
+            'if (v === true) return {done:true,ok:true,via:"sync-top"}; '
+            'if (v === false) return {done:true,ok:false,via:"sync-fail"}; '
+            'return {done:false,ok:false,via:"pending"}; '
             '} catch (e) { '
-            'window.byaliLog && window.byaliLog("ERROR","replace threw",{error:String(e)}); '
-            'return false; } '
+            'window.byaliLog && window.byaliLog("ERROR","startReplace threw",{error:String(e)}); '
+            'return {done:true,ok:false,via:"throw"}; } '
             '})()'
         )
-        self._runjs(js, callback=partial(self._after_replace, agent.name, original, result))
+        self._replace_ctx = {
+            'agent_name': agent.name,
+            'original': original,
+            'result': result,
+            'rid': rid,
+            'attempts': 0,
+        }
+        self._runjs(js, callback=self._on_replace_started)
+
+    def _on_replace_started(self, status):
+        if isinstance(status, str):
+            try:
+                status = json.loads(status)
+            except Exception:
+                status = None
+        debug_log.info('replace started status', session=self._session, status=status)
+        if isinstance(status, dict) and status.get('done'):
+            self._finish_replace(bool(status.get('ok')), via=str(status.get('via') or ''))
+            return
+        # Pending iframe work — poll (also if status is None / unexpected)
+        QTimer.singleShot(40, self._poll_replace_result)
+
+    def _poll_replace_result(self):
+        ctx = getattr(self, '_replace_ctx', None)
+        if not ctx:
+            return
+        ctx['attempts'] = int(ctx.get('attempts') or 0) + 1
+        if ctx['attempts'] > 50:  # ~2s
+            debug_log.error('replace poll timeout', session=self._session, attempts=ctx['attempts'])
+            self._finish_replace(False, via='timeout')
+            return
+
+        def _got(res):
+            if isinstance(res, str):
+                try:
+                    res = json.loads(res)
+                except Exception:
+                    res = None
+            if isinstance(res, dict) and res.get('done'):
+                self._finish_replace(bool(res.get('ok')), via=str(res.get('via') or 'poll'))
+                return
+            QTimer.singleShot(40, self._poll_replace_result)
+
+        try:
+            self._runjs(
+                'window.byaliGetReplaceResult ? JSON.stringify(window.byaliGetReplaceResult()) : "{\\"done\\":false}"',
+                callback=_got,
+            )
+        except Exception as e:
+            debug_log.exception('replace poll runjs failed', e, session=self._session)
+            self._finish_replace(False, via='poll-error')
+
+    def _finish_replace(self, ok: bool, via: str = ''):
+        ctx = getattr(self, '_replace_ctx', None) or {}
+        self._replace_ctx = None
+        agent_name = ctx.get('agent_name') or ''
+        result = ctx.get('result') or ''
+        debug_log.info(
+            'finish replace',
+            session=self._session,
+            ok=ok,
+            via=via,
+            agent=agent_name,
+        )
+
+        def _done():
+            if ok:
+                self.viewer.web_view.generic_action(
+                    'show-status-message',
+                    {'text': _('AI Agents: replaced selection with “{}” output').format(agent_name)},
+                )
+                return
+            debug_log.error('replace FAILED — opening debug log', session=self._session, via=via)
+            self._open_debug_log()
+            info_dialog(
+                self.viewer,
+                _('AI rewrite ready'),
+                _(
+                    'Could not replace the selection in the page (selection may have been cleared). '
+                    'The AI output is shown below — you can copy it manually.\n\n'
+                    'Byali Debug Log is open with the detailed timeline — please Copy all and send it.'
+                ),
+                det_msg=result,
+                show=True,
+            )
+
+        self._drain_js_log(then=_done)
 
     def _apply_note(self, agent, original, note_text):
         book_key = self._book_key()
@@ -405,68 +511,102 @@ class ByaliAIViewerController(QObject):
             'agent_name': saved.agent_name,
             'created_at': saved.created_at,
         }
-        js = (
-            'window.byaliAttachNoteToSelection && window.byaliAttachNoteToSelection('
-            + json.dumps(original)
-            + ', '
-            + json.dumps(note_text)
-            + ', '
-            + json.dumps(meta)
-            + ')'
-        )
-        self._runjs(js, callback=partial(self._after_note_attach, agent.name, note_text))
-
-    def _after_note_attach(self, agent_name, note_text, ok):
-        debug_log.info('after note attach', session=self._session, ok=ok, ok_type=type(ok).__name__)
-        self._drain_js_log()
-        if ok:
-            self.viewer.web_view.generic_action(
-                'show-status-message',
-                {'text': _('Byali: note attached ({})').format(agent_name)},
-            )
-            return
-        debug_log.error('note attach failed in page', session=self._session)
-        self._open_debug_log()
-        info_dialog(
-            self.viewer,
-            _('Note saved'),
-            _(
-                'The note was saved for this book, but the selection could not be marked in the page '
-                '(it may have been cleared). See Byali Debug Log for details. '
-                'Note text is shown below.'
-            ),
-            det_msg=note_text,
-            show=True,
-        )
-
-    def _after_replace(self, agent_name, original, result, ok):
         debug_log.info(
-            'after replace callback',
+            'calling byaliStartAttachNote (iframe postMessage)',
             session=self._session,
-            ok=ok,
-            ok_repr=repr(ok),
-            ok_type=type(ok).__name__,
-            agent=agent_name,
+            note_id=saved.id,
+            original_len=len(original or ''),
         )
+        a = json.dumps(original)
+        n = json.dumps(note_text)
+        m = json.dumps(meta)
+        js = (
+            '(function(){ try { '
+            'if (!window.byaliStartAttachNote) { '
+            'if (window.byaliAttachNoteToSelection) '
+            f'return {{done:true,ok:!!window.byaliAttachNoteToSelection({a},{n},{m}),via:"legacy"}}; '
+            'return {done:true,ok:false,via:"missing"}; } '
+            f'var v = window.byaliStartAttachNote({a}, {n}, {m}); '
+            'if (v === true) return {done:true,ok:true,via:"sync-top"}; '
+            'if (v === false) return {done:true,ok:false,via:"sync-fail"}; '
+            'return {done:false,ok:false,via:"pending"}; '
+            '} catch (e) { return {done:true,ok:false,via:"throw"}; } '
+            '})()'
+        )
+        self._note_ctx = {
+            'agent_name': agent.name,
+            'note_text': note_text,
+            'attempts': 0,
+        }
+        self._runjs(js, callback=self._on_note_started)
+
+    def _on_note_started(self, status):
+        if isinstance(status, str):
+            try:
+                status = json.loads(status)
+            except Exception:
+                status = None
+        debug_log.info('note started status', session=self._session, status=status)
+        if isinstance(status, dict) and status.get('done'):
+            self._finish_note(bool(status.get('ok')), via=str(status.get('via') or ''))
+            return
+        QTimer.singleShot(40, self._poll_note_result)
+
+    def _poll_note_result(self):
+        ctx = getattr(self, '_note_ctx', None)
+        if not ctx:
+            return
+        ctx['attempts'] = int(ctx.get('attempts') or 0) + 1
+        if ctx['attempts'] > 50:
+            debug_log.error('note poll timeout', session=self._session, attempts=ctx['attempts'])
+            self._finish_note(False, via='timeout')
+            return
+
+        def _got(res):
+            if isinstance(res, str):
+                try:
+                    res = json.loads(res)
+                except Exception:
+                    res = None
+            if isinstance(res, dict) and res.get('done'):
+                self._finish_note(bool(res.get('ok')), via=str(res.get('via') or 'poll'))
+                return
+            QTimer.singleShot(40, self._poll_note_result)
+
+        try:
+            self._runjs(
+                'window.byaliGetNoteResult ? JSON.stringify(window.byaliGetNoteResult()) : "{\\"done\\":false}"',
+                callback=_got,
+            )
+        except Exception as e:
+            debug_log.exception('note poll runjs failed', e, session=self._session)
+            self._finish_note(False, via='poll-error')
+
+    def _finish_note(self, ok: bool, via: str = ''):
+        ctx = getattr(self, '_note_ctx', None) or {}
+        self._note_ctx = None
+        agent_name = ctx.get('agent_name') or ''
+        note_text = ctx.get('note_text') or ''
+        debug_log.info('finish note attach', session=self._session, ok=ok, via=via, agent=agent_name)
 
         def _done():
             if ok:
                 self.viewer.web_view.generic_action(
                     'show-status-message',
-                    {'text': _('AI Agents: replaced selection with “{}” output').format(agent_name)},
+                    {'text': _('Byali: note attached ({})').format(agent_name)},
                 )
                 return
-            debug_log.error('replace FAILED — opening debug log', session=self._session)
+            debug_log.error('note attach failed in page', session=self._session, via=via)
             self._open_debug_log()
             info_dialog(
                 self.viewer,
-                _('AI rewrite ready'),
+                _('Note saved'),
                 _(
-                    'Could not replace the selection in the page (selection may have been cleared). '
-                    'The AI output is shown below — you can copy it manually.\n\n'
-                    'Byali Debug Log is open with the detailed timeline — please Copy all and send it.'
+                    'The note was saved for this book, but the selection could not be marked in the page '
+                    '(it may have been cleared). See Byali Debug Log for details. '
+                    'Note text is shown below.'
                 ),
-                det_msg=result,
+                det_msg=note_text,
                 show=True,
             )
 

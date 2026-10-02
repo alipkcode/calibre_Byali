@@ -2,29 +2,35 @@
 # License: GPLv3 Copyright: 2026, Ali / calibre_Byali
 #
 # Blueprint:
-#   - JS helpers injected into the ebook viewer ApplicationWorld
-#   - Shared JS log buffer (byaliLog / byaliDrainJsLog) for diagnostics
-#   - Replace current iframe selection with rewrite wrapper + i flip button
-#   - Toggle original <-> rewritten on i click
-#   - Detailed per-doc selection probes when replace fails (no behavior change)
+#   - Injected into main frame + iframes (profile script, RunsOnSubFrames)
+#   - Actual replace runs IN the frame that owns the selection (usually the book iframe)
+#   - Parent cannot read iframe.contentDocument → use postMessage to ask iframes
+#   - Parent exposes byaliStartReplace / byaliGetReplaceResult for Python polling
+#   - JS log buffer for Byali Debug Log
 
 """JavaScript helpers for in-viewer Byali text rewrite + original flip."""
 
 BYALI_VIEWER_HELPER_JS = r'''
 (function () {
-  // Always (re)install functions so logging updates apply on reinject.
   window.__byaliJsLog = window.__byaliJsLog || [];
 
   function byaliLog(level, msg, data) {
     try {
-      window.__byaliJsLog.push({
+      var entry = {
         t: Date.now(),
         level: level || 'DEBUG',
         msg: String(msg || ''),
         data: data === undefined ? null : data
-      });
+      };
+      window.__byaliJsLog.push(entry);
       if (window.__byaliJsLog.length > 800) {
         window.__byaliJsLog.splice(0, window.__byaliJsLog.length - 800);
+      }
+      // Sandboxed book iframe cannot share the parent's log buffer — forward entries.
+      if (!isTop) {
+        try {
+          window.parent.postMessage({ __byali: 'byali-js-log', entry: entry }, '*');
+        } catch (e) {}
       }
     } catch (e) {}
   }
@@ -36,6 +42,10 @@ BYALI_VIEWER_HELPER_JS = r'''
   };
 
   var STYLE_ID = 'byali-rewrite-style';
+  var MSG_REPLACE = 'byali-replace-do';
+  var MSG_RESULT = 'byali-replace-result';
+  var isTop = (window === window.top);
+
   if (!document.getElementById(STYLE_ID)) {
     var st = document.createElement('style');
     st.id = STYLE_ID;
@@ -45,40 +55,7 @@ BYALI_VIEWER_HELPER_JS = r'''
       '.byali-rewrite-info{display:inline-flex;align-items:center;justify-content:center;margin-left:.25em;width:1.05em;height:1.05em;border-radius:50%;border:1px solid currentColor;font:600 .72em/1 sans-serif;cursor:pointer;opacity:.85;vertical-align:super;padding:0;background:transparent;color:inherit;}',
       '.byali-rewrite-info:hover{opacity:1;}'
     ].join('');
-    document.documentElement.appendChild(st);
-  }
-
-  function bookDocs() {
-    var docs = [];
-    var iframeInfo = [];
-    try {
-      var iframes = document.querySelectorAll('iframe');
-      for (var i = 0; i < iframes.length; i++) {
-        var info = { index: i, accessible: false, error: null };
-        try {
-          var d = iframes[i].contentDocument;
-          if (d) {
-            docs.push(d);
-            info.accessible = true;
-            info.readyState = d.readyState;
-          } else {
-            info.error = 'contentDocument null';
-          }
-        } catch (e) {
-          info.error = String(e && e.message ? e.message : e);
-        }
-        iframeInfo.push(info);
-      }
-    } catch (e) {
-      byaliLog('WARN', 'iframe scan failed', { error: String(e) });
-    }
-    docs.push(document);
-    byaliLog('DEBUG', 'bookDocs', {
-      iframe_count: iframeInfo.length,
-      docs: docs.length,
-      iframes: iframeInfo
-    });
-    return docs;
+    (document.head || document.documentElement).appendChild(st);
   }
 
   function ensureStyleInDoc(doc) {
@@ -128,125 +105,400 @@ BYALI_VIEWER_HELPER_JS = r'''
     return wrap;
   }
 
-  function probeDoc(doc, index, original) {
-    var probe = {
-      index: index,
-      is_top: doc === document,
-      has_getSelection: !!(doc.getSelection),
+  function localSelectionInfo(original) {
+    var info = {
+      is_top: isTop,
       rangeCount: 0,
       selected_len: 0,
       selected_preview: '',
-      matches_original: null,
-      activeElement: null
+      isCollapsed: true,
+      matches_original: null
     };
     try {
-      probe.activeElement = doc.activeElement ? (doc.activeElement.tagName || '') : null;
-    } catch (e) {}
-    try {
-      var sel = doc.getSelection ? doc.getSelection() : null;
-      if (!sel) {
-        probe.error = 'getSelection returned null';
-        return probe;
-      }
-      probe.rangeCount = sel.rangeCount || 0;
-      probe.isCollapsed = !!sel.isCollapsed;
-      if (sel.rangeCount) {
-        var t = String(sel.toString() || '');
-        probe.selected_len = t.length;
-        probe.selected_preview = t.slice(0, 80);
-        if (original) {
-          probe.matches_original = (t === original) || (t.trim() === String(original).trim());
-        }
-        try {
-          var r = sel.getRangeAt(0);
-          probe.start_node = r.startContainer && r.startContainer.nodeName;
-          probe.end_node = r.endContainer && r.endContainer.nodeName;
-        } catch (e2) {
-          probe.range_error = String(e2 && e2.message ? e2.message : e2);
-        }
+      var sel = window.getSelection ? window.getSelection() : null;
+      if (!sel) return info;
+      info.rangeCount = sel.rangeCount || 0;
+      info.isCollapsed = !!sel.isCollapsed;
+      var t = String(sel.toString() || '');
+      info.selected_len = t.length;
+      info.selected_preview = t.slice(0, 80);
+      if (original) {
+        info.matches_original = (t === original) || (t.trim() === String(original).trim());
       }
     } catch (e) {
-      probe.error = String(e && e.message ? e.message : e);
+      info.error = String(e && e.message ? e.message : e);
     }
-    return probe;
+    return info;
   }
 
-  window.byaliReplaceSelection = function (original, rewritten, rid) {
-    byaliLog('INFO', 'byaliReplaceSelection called', {
+  function findTextRange(doc, needle) {
+    var want = String(needle || '');
+    if (!want) return null;
+    var root = doc.body || doc.documentElement;
+    if (!root) return null;
+    // Exact match inside one text node
+    var walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+    var node;
+    while ((node = walker.nextNode())) {
+      if (!node.nodeValue) continue;
+      if (node.parentElement && node.parentElement.closest('.byali-rewrite')) continue;
+      var idx = node.nodeValue.indexOf(want);
+      if (idx < 0) continue;
+      try {
+        var range = doc.createRange();
+        range.setStart(node, idx);
+        range.setEnd(node, idx + want.length);
+        return range;
+      } catch (e) {}
+    }
+    // Cross-node exact concatenation
+    var nodes = [];
+    var full = '';
+    walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+    while ((node = walker.nextNode())) {
+      if (!node.nodeValue) continue;
+      if (node.parentElement && node.parentElement.closest('.byali-rewrite')) continue;
+      nodes.push({ node: node, start: full.length });
+      full += node.nodeValue;
+    }
+    var at = full.indexOf(want);
+    if (at < 0) {
+      var trimmed = want.trim();
+      if (trimmed && trimmed !== want) at = full.indexOf(trimmed);
+      if (at >= 0) want = trimmed;
+    }
+    if (at < 0) return null;
+    var endAt = at + want.length;
+    var startNode = null, startOff = 0, endNode = null, endOff = 0;
+    for (var i = 0; i < nodes.length; i++) {
+      var a = nodes[i].start;
+      var b = a + nodes[i].node.nodeValue.length;
+      if (!startNode && at >= a && at < b) {
+        startNode = nodes[i].node;
+        startOff = at - a;
+      }
+      if (endAt > a && endAt <= b) {
+        endNode = nodes[i].node;
+        endOff = endAt - a;
+        break;
+      }
+    }
+    if (!startNode || !endNode) return null;
+    try {
+      var r2 = doc.createRange();
+      r2.setStart(startNode, startOff);
+      r2.setEnd(endNode, endOff);
+      return r2;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // Replace inside THIS document only (works when called inside the book iframe).
+  function replaceInThisDocument(original, rewritten, rid) {
+    byaliLog('INFO', 'replaceInThisDocument', {
+      is_top: isTop,
       original_len: original ? String(original).length : 0,
       rewritten_len: rewritten ? String(rewritten).length : 0,
-      rid: rid || '',
-      original_preview: original ? String(original).slice(0, 80) : '',
-      rewritten_preview: rewritten ? String(rewritten).slice(0, 80) : ''
+      sel: localSelectionInfo(original)
     });
-    var docs = bookDocs();
-    var probes = [];
-    for (var i = 0; i < docs.length; i++) {
-      var doc = docs[i];
-      var probe = probeDoc(doc, i, original);
-      probes.push(probe);
-      var sel = doc.getSelection ? doc.getSelection() : null;
-      if (!sel || !sel.rangeCount) continue;
+    var doc = document;
+    var sel = window.getSelection ? window.getSelection() : null;
+
+    // 1) Live selection in this frame
+    if (sel && sel.rangeCount) {
       var range = sel.getRangeAt(0);
       var selected = range.toString();
-      if (!selected) {
-        byaliLog('DEBUG', 'doc has rangeCount but empty toString', { index: i });
-        continue;
+      if (selected) {
+        try {
+          var wrap = buildWrapper(doc, original || selected, rewritten, rid);
+          range.deleteContents();
+          range.insertNode(wrap);
+          sel.removeAllRanges();
+          byaliLog('INFO', 'replace via live selection SUCCESS', { is_top: isTop, rid: rid || '' });
+          return true;
+        } catch (e) {
+          byaliLog('ERROR', 'live selection insert failed', {
+            is_top: isTop,
+            error: String(e && e.message ? e.message : e)
+          });
+        }
       }
-      byaliLog('INFO', 'attempting insert on doc', {
-        index: i,
-        selected_len: selected.length,
-        selected_preview: selected.slice(0, 80)
-      });
-      try {
-        var wrap = buildWrapper(doc, original || selected, rewritten, rid);
-        range.deleteContents();
-        range.insertNode(wrap);
-        sel.removeAllRanges();
-        byaliLog('INFO', 'replace SUCCESS', { index: i, rid: rid || '' });
-        return true;
-      } catch (e) {
-        byaliLog('ERROR', 'insert failed', {
-          index: i,
-          error: String(e && e.message ? e.message : e),
-          name: e && e.name ? e.name : ''
+    }
+
+    // 2) Text search for the original passage in this document
+    if (original) {
+      var fr = findTextRange(doc, original) || findTextRange(doc, String(original).trim());
+      if (fr) {
+        try {
+          var wrap2 = buildWrapper(doc, original, rewritten, rid);
+          fr.deleteContents();
+          fr.insertNode(wrap2);
+          byaliLog('INFO', 'replace via text search SUCCESS', { is_top: isTop, rid: rid || '' });
+          return true;
+        } catch (e2) {
+          byaliLog('ERROR', 'text search insert failed', {
+            is_top: isTop,
+            error: String(e2 && e2.message ? e2.message : e2)
+          });
+        }
+      } else {
+        byaliLog('DEBUG', 'text search found no match in this frame', {
+          is_top: isTop,
+          original_preview: String(original).slice(0, 80)
         });
       }
     }
-    byaliLog('ERROR', 'replace FAILED — no usable selection', {
-      probes: probes,
-      helper_flag: !!window.__byali_ai_helper__
+    return false;
+  }
+
+  window.byaliReplaceInThisDocument = replaceInThisDocument;
+
+  function reportResult(rid, ok, via) {
+    var payload = { __byali: MSG_RESULT, rid: rid || '', ok: !!ok, via: via || '', is_top: isTop };
+    byaliLog(ok ? 'INFO' : 'WARN', 'replace result', payload);
+    if (isTop) {
+      window.__byaliReplaceResult = { done: true, ok: !!ok, rid: rid || '', via: via || '' };
+    } else {
+      try {
+        window.parent.postMessage(payload, '*');
+      } catch (e) {
+        byaliLog('ERROR', 'postMessage result failed', { error: String(e) });
+      }
+    }
+  }
+
+  // Listen for replace requests (iframe) / results (parent).
+  // Re-assign handler on every inject so hot-reloads pick up new logic without stacking listeners.
+  window.__byaliOnReplaceMessage = function (ev) {
+    var data = ev && ev.data;
+    if (!data || typeof data !== 'object') return;
+
+    if (isTop && data.__byali === 'byali-js-log' && data.entry) {
+      try {
+        window.__byaliJsLog = window.__byaliJsLog || [];
+        window.__byaliJsLog.push(data.entry);
+        if (window.__byaliJsLog.length > 800) {
+          window.__byaliJsLog.splice(0, window.__byaliJsLog.length - 800);
+        }
+      } catch (e) {}
+      return;
+    }
+
+    if (!isTop && data.__byali === MSG_REPLACE) {
+      byaliLog('INFO', 'iframe received replace request', {
+        rid: data.rid || '',
+        original_len: data.original ? String(data.original).length : 0
+      });
+      var ok = false;
+      try {
+        ok = replaceInThisDocument(data.original || '', data.rewritten || '', data.rid || '');
+      } catch (e) {
+        byaliLog('ERROR', 'iframe replace threw', { error: String(e) });
+      }
+      reportResult(data.rid, ok, ok ? 'iframe' : 'iframe-fail');
+      return;
+    }
+
+    if (isTop && data.__byali === MSG_RESULT) {
+      byaliLog('INFO', 'parent received iframe replace result', data);
+      // Prefer success if any iframe reports ok (multi-iframe books).
+      var prev = window.__byaliReplaceResult;
+      if (prev && prev.done && prev.ok) return;
+      window.__byaliReplaceResult = {
+        done: true,
+        ok: !!data.ok,
+        rid: data.rid || '',
+        via: data.via || 'iframe'
+      };
+    }
+  };
+  if (!window.__byali_replace_msg_hook__) {
+    window.__byali_replace_msg_hook__ = true;
+    window.addEventListener('message', function (ev) {
+      if (typeof window.__byaliOnReplaceMessage === 'function') {
+        window.__byaliOnReplaceMessage(ev);
+      }
+    }, false);
+  }
+
+  function postReplaceToIframes(original, rewritten, rid) {
+    var frames = document.querySelectorAll('iframe');
+    var sent = 0;
+    var errors = [];
+    for (var i = 0; i < frames.length; i++) {
+      try {
+        var win = frames[i].contentWindow;
+        if (!win) {
+          errors.push({ index: i, error: 'contentWindow null' });
+          continue;
+        }
+        win.postMessage({
+          __byali: MSG_REPLACE,
+          original: original || '',
+          rewritten: rewritten || '',
+          rid: rid || ''
+        }, '*');
+        sent++;
+      } catch (e) {
+        errors.push({ index: i, error: String(e && e.message ? e.message : e) });
+      }
+    }
+    byaliLog('INFO', 'posted replace to iframes', { sent: sent, iframe_count: frames.length, errors: errors });
+    return sent;
+  }
+
+  // Called from Python on the TOP frame. Kicks off async iframe replace.
+  window.byaliStartReplace = function (original, rewritten, rid) {
+    byaliLog('INFO', 'byaliStartReplace', {
+      is_top: isTop,
+      original_len: original ? String(original).length : 0,
+      rewritten_len: rewritten ? String(rewritten).length : 0,
+      rid: rid || '',
+      local_sel: localSelectionInfo(original)
     });
+    window.__byaliReplaceResult = { done: false, ok: false, rid: rid || '', via: '' };
+
+    // Try this frame first (rare for book content, but cheap)
+    if (replaceInThisDocument(original, rewritten, rid)) {
+      window.__byaliReplaceResult = { done: true, ok: true, rid: rid || '', via: 'top' };
+      return true;
+    }
+
+    if (isTop) {
+      var sent = postReplaceToIframes(original, rewritten, rid);
+      if (!sent) {
+        // Last resort: text search already tried on top; mark failed soon
+        window.__byaliReplaceResult = { done: true, ok: false, rid: rid || '', via: 'no-iframe' };
+        byaliLog('ERROR', 'no iframes reachable for postMessage');
+        return false;
+      }
+      // Async — Python must poll byaliGetReplaceResult
+      return null;
+    }
     return false;
   };
 
-  window.byaliGetSelectedText = function () {
-    var docs = bookDocs();
-    for (var i = 0; i < docs.length; i++) {
-      var doc = docs[i];
-      var sel = doc.getSelection ? doc.getSelection() : null;
-      if (!sel) continue;
-      var t = String(sel.toString() || '');
-      if (t) {
-        byaliLog('DEBUG', 'byaliGetSelectedText hit', { index: i, len: t.length });
-        return t;
-      }
+  window.byaliGetReplaceResult = function () {
+    return window.__byaliReplaceResult || { done: false, ok: false, rid: '', via: '' };
+  };
+
+  // Back-compat name used by older callers: prefer StartReplace semantics on top.
+  window.byaliReplaceSelection = function (original, rewritten, rid) {
+    if (isTop) {
+      return window.byaliStartReplace(original, rewritten, rid);
     }
-    byaliLog('DEBUG', 'byaliGetSelectedText empty');
+    return replaceInThisDocument(original, rewritten, rid);
+  };
+
+  window.byaliGetSelectedText = function () {
+    var sel = window.getSelection ? window.getSelection() : null;
+    var t = sel ? String(sel.toString() || '') : '';
+    if (t) {
+      byaliLog('DEBUG', 'byaliGetSelectedText local hit', { is_top: isTop, len: t.length });
+      return t;
+    }
     return '';
   };
 
   window.byaliDiagnoseSelection = function (original) {
-    var docs = bookDocs();
-    var probes = [];
-    for (var i = 0; i < docs.length; i++) {
-      probes.push(probeDoc(docs[i], i, original || ''));
+    var probe = localSelectionInfo(original || '');
+    var iframe_meta = [];
+    if (isTop) {
+      var frames = document.querySelectorAll('iframe');
+      for (var i = 0; i < frames.length; i++) {
+        var m = { index: i, has_contentWindow: false, has_contentDocument: false };
+        try { m.has_contentWindow = !!frames[i].contentWindow; } catch (e) { m.cw_error = String(e); }
+        try { m.has_contentDocument = !!frames[i].contentDocument; } catch (e2) { m.cd_error = String(e2); }
+        iframe_meta.push(m);
+      }
     }
-    byaliLog('INFO', 'diagnoseSelection', { probes: probes });
-    return probes;
+    byaliLog('INFO', 'diagnoseSelection', { probe: probe, iframes: iframe_meta });
+    return { probe: probe, iframes: iframe_meta };
   };
 
+  // Same postMessage pattern for notes (iframe does the wrap)
+  var MSG_NOTE = 'byali-note-do';
+  var MSG_NOTE_RESULT = 'byali-note-result';
+
+  window.byaliStartAttachNote = function (anchorText, note, meta) {
+    meta = meta || {};
+    window.__byaliNoteResult = { done: false, ok: false, id: meta.id || '' };
+    byaliLog('INFO', 'byaliStartAttachNote', {
+      is_top: isTop,
+      anchor_len: anchorText ? String(anchorText).length : 0,
+      note_len: note ? String(note).length : 0
+    });
+    // Local attempt if selection/text is here
+    if (typeof window.byaliAttachNoteInThisDocument === 'function') {
+      try {
+        if (window.byaliAttachNoteInThisDocument(anchorText, note, meta)) {
+          window.__byaliNoteResult = { done: true, ok: true, id: meta.id || '', via: isTop ? 'top' : 'iframe-local' };
+          return true;
+        }
+      } catch (e) {}
+    }
+    if (!isTop) return false;
+    var frames = document.querySelectorAll('iframe');
+    var sent = 0;
+    for (var i = 0; i < frames.length; i++) {
+      try {
+        frames[i].contentWindow.postMessage({
+          __byali: MSG_NOTE,
+          anchorText: anchorText || '',
+          note: note || '',
+          meta: meta || {}
+        }, '*');
+        sent++;
+      } catch (e) {}
+    }
+    byaliLog('INFO', 'posted note attach to iframes', { sent: sent });
+    if (!sent) {
+      window.__byaliNoteResult = { done: true, ok: false, id: meta.id || '', via: 'no-iframe' };
+      return false;
+    }
+    return null;
+  };
+
+  window.byaliGetNoteResult = function () {
+    return window.__byaliNoteResult || { done: false, ok: false, id: '', via: '' };
+  };
+
+  window.__byaliOnNoteMessage = function (ev) {
+    var data = ev && ev.data;
+    if (!data || typeof data !== 'object') return;
+    if (!isTop && data.__byali === MSG_NOTE) {
+      var ok = false;
+      try {
+        if (typeof window.byaliAttachNoteInThisDocument === 'function') {
+          ok = !!window.byaliAttachNoteInThisDocument(data.anchorText || '', data.note || '', data.meta || {});
+        }
+      } catch (e) {}
+      try {
+        window.parent.postMessage({
+          __byali: MSG_NOTE_RESULT,
+          ok: ok,
+          id: (data.meta && data.meta.id) || ''
+        }, '*');
+      } catch (e2) {}
+    }
+    if (isTop && data.__byali === MSG_NOTE_RESULT) {
+      var prevN = window.__byaliNoteResult;
+      if (prevN && prevN.done && prevN.ok) return;
+      window.__byaliNoteResult = { done: true, ok: !!data.ok, id: data.id || '', via: 'iframe' };
+    }
+  };
+  if (!window.__byali_note_msg_hook__) {
+    window.__byali_note_msg_hook__ = true;
+    window.addEventListener('message', function (ev) {
+      if (typeof window.__byaliOnNoteMessage === 'function') {
+        window.__byaliOnNoteMessage(ev);
+      }
+    }, false);
+  }
+
   window.__byali_ai_helper__ = true;
-  byaliLog('INFO', 'Byali rewrite helper installed/updated');
+  window.__byali_ai_helper_ver__ = 2;
+  byaliLog('INFO', 'Byali rewrite helper installed/updated', { is_top: isTop, ver: 2 });
 })();
 '''
